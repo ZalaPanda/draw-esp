@@ -404,7 +404,7 @@ The project implements board initialization (Stage 1), user-button brightness co
 - A 460,800-byte native-order RGB565 framebuffer is allocated in PSRAM. A single 15,360-byte internal DMA staging buffer sends 16-row stripes in panel-required big-endian pixel order. Each transfer waits for its completion callback with a bounded timeout before reusing the buffer. Buffers remain allocated for the application's lifetime; allocation, bus, panel and transfer failures are logged and fatal during bring-up.
 - The panel is blanked while uploading the pattern, then enabled at 20% brightness. The pattern contains white/yellow/cyan/green/magenta/red/blue/black bars, a white center cross and a lower grayscale ramp. Its square-frame corners are naturally clipped by the circular visible display. Initialization delays and transfer waits occur only during startup; there is no polling or busy main loop. Stage 1 does not yet provide continuous updates or tearing synchronization.
 
-The generated default partition table remains temporary: NVS at `0x9000` (24 KB), PHY data at `0xf000` (4 KB), and a large single factory application at `0x10000`. This leaves room for the current decoder and networking dependencies during board bring-up; the remaining 16 MB flash is not allocated for application data yet. OTA and filesystem partitions will be designed when their requirements are implemented.
+The custom partition table in `partitions.csv` keeps NVS at `0x9000` (24 KB) and PHY data at `0xf000` (4 KB), allocates a 2.5 MiB factory application at `0x10000`, and reserves two 1.0625 MiB data slots for crash-safe last-image updates. OTA and a general filesystem remain unallocated. Updating firmware with this partition table changes the on-flash layout; it must be flashed without a full-chip erase, and the existing factory backup must remain untouched.
 
 ### Stage 1A implementation: manual brightness
 
@@ -414,7 +414,7 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 20 -> 10 -> 0 -> 100 -> 90 -> 80 -> 70 -> 60 -> 50 -> 40 -> 30 -> 20 -> ...
 ```
 
-- Brightness is a percentage from 0 to 100, initially 20 after every reboot. It is not persisted to flash.
+- Brightness is a percentage from 0 to 100, initially 20 after every reboot. The brightness setting itself is not persisted to flash.
 - `main/input/brightness_button.cpp` configures the verified active-low GPIO as an input and samples it every 10 ms in a dedicated FreeRTOS task. Press and release each require 50 ms of stable input. Holding the button does not repeat. A button held when the task starts must first be released before it can trigger a step.
 - `main/input/button_debouncer.h` isolates the debounce state machine. Brightness changes occur in task context, not an ISR, and `app_main` returns normally. The existing FreeRTOS 100 Hz tick rate needs no configuration changes.
 - `display::decrease_brightness()` is the single owner of brightness state; it sends the CO5300 brightness command and updates the tracked value only on success. Failures are logged; release and press again to retry. There are no other runtime display writers at this stage; future network/display work must serialize access before introducing concurrent writers.
@@ -447,8 +447,8 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 
 - `main/image/jpeg_decoder.cpp` uses Espressif's `esp_jpeg` component. It inspects JPEG dimensions before allocating decoded output and selects the largest decoder scale that keeps the result at or below 480 × 480. The compressed request and decoded RGB565 pixels use PSRAM; decoded memory is capped at one display frame.
 - `display::show_rgb565()` serializes against brightness and clear operations, applies `contain`, `cover`, or `stretch` using nearest-neighbor sampling into the existing framebuffer, flushes the frame, then enables the panel.
-- The display retains a PSRAM copy of the latest decoded image so orientation changes can redraw it without another upload. `clear()` releases that copy; the retained image is volatile and is not written to flash.
-- `POST /api/image` decodes JPEG, PNG, and BMP and returns width, height, format, and fit on success. PNG and BMP inputs are limited to 480 × 480 pixels to bound decoder memory. PNG transparency is composited onto black. BMP support is limited to uncompressed 24-bit and 32-bit files; palette, bitfield-compressed, and other encodings are rejected. Progressive JPEG support follows the limits of the bundled decoder and may be rejected as malformed. Uploads remain transient and are not saved to flash.
+- The display retains a PSRAM copy of the latest decoded image so orientation changes can redraw it without another upload. `clear()` releases that copy.
+- `POST /api/image` decodes JPEG, PNG, and BMP and returns width, height, format, and fit on success. PNG and BMP inputs are limited to 480 × 480 pixels to bound decoder memory. PNG transparency is composited onto black. BMP support is limited to uncompressed 24-bit and 32-bit files; palette, bitfield-compressed, and other encodings are rejected. Progressive JPEG support follows the limits of the bundled decoder and may be rejected as malformed. Stage 6 stores the successfully decoded upload's original compressed bytes in flash for restart recovery.
 - `main/input/orientation.cpp` initializes the QMI8658 at address `0x6B` on the PMIC module's existing 400 kHz GPIO14/15 I²C bus. It samples accelerometer data every 100 ms and accepts a new orientation after eight consecutive samples with at least 0.70 g on a dominant in-plane axis. Face-up/down and diagonal positions retain the last orientation, providing hysteresis against boundary flicker. The accelerometer runs at 125 Hz in ±4 g range; the gyroscope is left disabled. The managed driver 2.0.2 header declares `qmi8658_read_accel_mps2()`, but that version does not define it, so the firmware uses the implemented `qmi8658_read_accel()` with m/s² units enabled.
 - Orientation is applied in software before fitting, so all three fit modes rotate with the display while panel initialization stays fixed. The mapping assumes the sensor X/Y axes lie in the display plane: +Y is 0°, −X is 90°, −Y is 180°, and +X is 270°. Confirm the physical mapping and stability on the board; sensor-axis mounting and orientation cannot be confirmed by a host build.
 
@@ -483,7 +483,7 @@ After approval, hardware acceptance consists of:
 4. Confirm the visible test pattern has correct colors, a centered cross and smooth black-to-white grayscale, at reduced brightness.
 5. Reboot and repeat. Avoid leaving a static AMOLED test pattern on for extended periods.
 
-A successful build verifies compilation and configuration, not physical panel operation or PWR-button safety. Hardware acceptance remains pending until an approved flash and board test.
+A successful build verifies compilation and configuration, not physical panel operation or PWR-button safety. The user reports that board acceptance for Stages 1A–5 passed. Stage 6 persistence and timed brightness still need physical validation after the updated firmware is flashed.
 
 Software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build and Stage 1A compile-time logic tests pass. The firmware image with brightness-button control is 255,184 bytes, leaving 76% of the temporary 1 MB app partition free. Generated configuration checks confirm octal PSRAM at 80 MHz with boot memory test, 240 MHz CPU, USB Serial/JTAG console, 16 MB flash, no LVGL dependency and no Secure Boot/Flash Encryption enablement. ESP-IDF 6.1 may emit component-validation warnings for private `esp_wifi`/`wpa_supplicant` include directories (`wifi_apps/roaming_app` and `esp_supplicant`). These paths are declared by the framework's own component CMake files and are used internally by those components; they are not project include paths or firmware warnings. A warning-free configure requires an ESP-IDF release containing the corresponding framework CMake correction; changing application `PRIV_REQUIRES` cannot correct these internal declarations.
 
@@ -493,9 +493,11 @@ Stage 4 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes 
 
 Stage 5 software validation: the ESP-IDF 6.1 ESP32-S3 build passes with JPEG, PNG, and BMP decoding, bounded PSRAM buffers, RGB565 fitting, and QMI8658 orientation/redraw support. The firmware binary is 0x103700 bytes; the 0x177000 app partition leaves 0x73900 bytes (31%) free. Physical sensor-axis, PNG/BMP decode, upload, and render validation remain pending an approved flash.
 
-Stage 1A physical acceptance after an approved flash: confirm successive GPIO18 presses give `10%, 0%, 100%, 90%` starting from 20%, continue through the full cycle, hold the button to verify no repeat, and reboot to confirm the default returns to 20%. Confirm the image is retained at 0% and reappears on the next press, and that BOOT/PWR are not used for dimming. Physical debounce and panel-brightness behavior remain pending board validation.
+The user reports that Stage 1A physical acceptance passed: the GPIO18 brightness cycle, hold behavior, reboot default, image retention at 0%, and separation from BOOT/PWR were verified on the board.
 
-Stage 2–3 physical acceptance after an approved flash: confirm a short PWR press alternates AP on/off, a held PWR press does not toggle repeatedly, and the existing PMIC long-press power-off still behaves as before. Configure STA credentials, verify connection and DHCP, disable AP and confirm the STA connection and HTTP API remain available, then re-enable AP and verify `192.168.4.1`. Verify reconnect after router loss and confirm saved credentials survive reboot. Confirm `esp32-display.local` resolution on the local network. These checks are not complete until performed on the board.
+The user reports that Stage 2–3 physical acceptance passed: PWR short/long press behavior, AP toggling, STA connection and DHCP, reconnect, credential persistence, HTTP availability, and mDNS were verified on the board.
+
+The user reports that Stage 4–5 hardware testing also passed, including display clearing, image upload/decode/render, and orientation behavior. The new Stage 6 persistence and timed-brightness behavior still requires board validation after firmware installation.
 
 Before coding:
 
@@ -554,6 +556,17 @@ Then implement in small, independently testable stages:
 - Verify the complete workflow.
 - Document build, flash and recovery procedures.
 - Document API endpoints and example curl commands.
+
+### Stage 6 implementation — persistent last image and timed brightness
+
+- `partitions.csv` provides two alternating raw flash slots, each large enough for the maximum 1 MiB compressed upload plus metadata. The slots are separate from NVS and the application partition.
+- `main/image/image_store.cpp` stores the original compressed JPEG/PNG/BMP bytes, selected fit mode, generation, and CRC32. Each update is written to the inactive slot and commits its header last, so a power loss during an upload leaves the previous image recoverable. `DELETE /api/image` writes a clear marker so the old slot is not restored after reboot.
+- At startup, the firmware validates the newest saved record, decodes it, and renders it at the normal 20% startup brightness. If there is no saved image or the saved data is invalid, it displays the existing test pattern.
+- A successful image upload displays at 100% for 30 seconds, then returns to 20%. Each new upload restarts the timer. A manual GPIO18 brightness press cancels the timer and resumes the existing manual brightness cycle.
+- Clearing the display cancels the timer, sets brightness to 20%, and commits a persistent clear marker.
+- Flashing the firmware with the custom partition table is required for this feature. Do not use a full-chip erase; preserve the factory backup. The new storage behavior and recovery after interrupted writes require board testing.
+
+Stage 6 software validation (2026-11-05): ESP-IDF 6.1 build passes with the custom partition table and persistent-image/timed-brightness code. The firmware binary is 0x104430 bytes, leaving 0x17bbd0 bytes (59%) of the 2.5 MiB factory app partition free. No firmware was flashed during implementation. Board validation of reboot recovery, `/api/image` deletion persistence, interrupted writes, and the 30-second brightness cycle remains pending.
 
 ## 13. Critical development rules
 

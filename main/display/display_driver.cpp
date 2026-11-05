@@ -10,12 +10,16 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
 namespace {
 constexpr char kTag[] = "display";
 constexpr int kStripeRows = 16;
+constexpr int kUploadBrightnessPercent = 100;
+constexpr int kIdleBrightnessPercent = 20;
+constexpr uint64_t kUploadBrightnessDurationUs = 30ULL * 1000 * 1000;
 constexpr size_t kFramePixels = board::kDisplayWidth * board::kDisplayHeight;
 constexpr size_t kStripePixels = board::kDisplayWidth * kStripeRows;
 static_assert(kFramePixels * sizeof(uint16_t) == 460800);
@@ -62,6 +66,7 @@ SemaphoreHandle_t transfer_done = nullptr;
 SemaphoreHandle_t display_mutex = nullptr;
 bool initialized = false;
 int brightness_percent = 20;
+esp_timer_handle_t brightness_timer = nullptr;
 
 constexpr int next_brightness(int current)
 {
@@ -157,6 +162,53 @@ void render_source()
         }
     }
 }
+
+void brightness_timer_callback(void *)
+{
+    if (!initialized) return;
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    const esp_err_t error = esp_lcd_panel_co5300_set_brightness(panel, kIdleBrightnessPercent);
+    if (error == ESP_OK) {
+        brightness_percent = kIdleBrightnessPercent;
+        ESP_LOGI(kTag, "Upload brightness timeout: %d%%", brightness_percent);
+    } else {
+        ESP_LOGE(kTag, "Timed brightness reduction failed: %s", esp_err_to_name(error));
+    }
+    xSemaphoreGive(display_mutex);
+}
+
+esp_err_t render_image(const uint16_t *pixels, int width, int height, display::FitMode fit, bool new_upload)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    ESP_RETURN_ON_FALSE(pixels != nullptr && width > 0 && height > 0, ESP_ERR_INVALID_ARG, kTag,
+                        "Invalid source image");
+    if (new_upload && esp_timer_is_active(brightness_timer)) esp_timer_stop(brightness_timer);
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    auto *replacement = static_cast<uint16_t *>(heap_caps_malloc(
+        static_cast<size_t>(width) * height * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (replacement == nullptr) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_NO_MEM;
+    }
+    std::memcpy(replacement, pixels, static_cast<size_t>(width) * height * sizeof(uint16_t));
+    if (source_image != nullptr) heap_caps_free(source_image);
+    source_image = replacement;
+    source_width = width;
+    source_height = height;
+    source_fit = fit;
+    render_source();
+    esp_err_t error = flush_framebuffer();
+    if (error == ESP_OK && new_upload) {
+        error = esp_lcd_panel_co5300_set_brightness(panel, kUploadBrightnessPercent);
+        if (error == ESP_OK) brightness_percent = kUploadBrightnessPercent;
+    }
+    if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+    xSemaphoreGive(display_mutex);
+    if (error == ESP_OK && new_upload) {
+        error = esp_timer_start_once(brightness_timer, kUploadBrightnessDurationUs);
+    }
+    return error;
+}
 static_assert(gray_rgb565(0) == 0x0000);
 static_assert(gray_rgb565(255) == 0xFFFF);
 }
@@ -175,6 +227,13 @@ esp_err_t initialize()
     ESP_RETURN_ON_FALSE(transfer_done != nullptr, ESP_ERR_NO_MEM, kTag, "Transfer semaphore creation failed");
     display_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(display_mutex != nullptr, ESP_ERR_NO_MEM, kTag, "Display mutex creation failed");
+    esp_timer_create_args_t brightness_timer_config = {};
+    brightness_timer_config.callback = brightness_timer_callback;
+    brightness_timer_config.dispatch_method = ESP_TIMER_TASK;
+    brightness_timer_config.name = "image_brightness";
+    brightness_timer_config.skip_unhandled_events = true;
+    ESP_RETURN_ON_ERROR(esp_timer_create(&brightness_timer_config, &brightness_timer), kTag,
+                        "Timed brightness timer creation failed");
 
     spi_bus_config_t bus_config = {};
     bus_config.sclk_io_num = board::kDisplayClock;
@@ -253,27 +312,12 @@ esp_err_t show_test_pattern()
 
 esp_err_t show_rgb565(const uint16_t *pixels, int width, int height, FitMode fit)
 {
-    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
-    ESP_RETURN_ON_FALSE(pixels != nullptr && width > 0 && height > 0, ESP_ERR_INVALID_ARG, kTag,
-                        "Invalid source image");
-    xSemaphoreTake(display_mutex, portMAX_DELAY);
-    auto *replacement = static_cast<uint16_t *>(heap_caps_malloc(
-        static_cast<size_t>(width) * height * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (replacement == nullptr) {
-        xSemaphoreGive(display_mutex);
-        return ESP_ERR_NO_MEM;
-    }
-    std::memcpy(replacement, pixels, static_cast<size_t>(width) * height * sizeof(uint16_t));
-    if (source_image != nullptr) heap_caps_free(source_image);
-    source_image = replacement;
-    source_width = width;
-    source_height = height;
-    source_fit = fit;
-    render_source();
-    esp_err_t error = flush_framebuffer();
-    if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
-    xSemaphoreGive(display_mutex);
-    return error;
+    return render_image(pixels, width, height, fit, true);
+}
+
+esp_err_t restore_rgb565(const uint16_t *pixels, int width, int height, FitMode fit)
+{
+    return render_image(pixels, width, height, fit, false);
 }
 
 esp_err_t set_rotation(Rotation rotation)
@@ -294,6 +338,7 @@ esp_err_t set_rotation(Rotation rotation)
 esp_err_t clear()
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    if (esp_timer_is_active(brightness_timer)) esp_timer_stop(brightness_timer);
     xSemaphoreTake(display_mutex, portMAX_DELAY);
     std::memset(framebuffer, 0, kFramePixels * sizeof(uint16_t));
     if (source_image != nullptr) {
@@ -301,7 +346,9 @@ esp_err_t clear()
         source_image = nullptr;
         source_width = source_height = 0;
     }
-    const esp_err_t error = flush_framebuffer();
+    esp_err_t error = esp_lcd_panel_co5300_set_brightness(panel, kIdleBrightnessPercent);
+    if (error == ESP_OK) brightness_percent = kIdleBrightnessPercent;
+    if (error == ESP_OK) error = flush_framebuffer();
     xSemaphoreGive(display_mutex);
     return error;
 }
@@ -309,6 +356,7 @@ esp_err_t clear()
 esp_err_t decrease_brightness()
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    if (esp_timer_is_active(brightness_timer)) esp_timer_stop(brightness_timer);
     xSemaphoreTake(display_mutex, portMAX_DELAY);
     const int next = next_brightness(brightness_percent);
     const esp_err_t error = esp_lcd_panel_co5300_set_brightness(panel, next);

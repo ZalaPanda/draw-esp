@@ -7,6 +7,7 @@
 #include "cJSON.h"
 #include "display/display_driver.h"
 #include "image/image_decoder.h"
+#include "image/image_store.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
@@ -86,6 +87,8 @@ esp_err_t handle_root(httpd_req_t *request)
 
 esp_err_t handle_clear_image(httpd_req_t *request)
 {
+    const esp_err_t store_error = image_store::clear();
+    if (store_error != ESP_OK) return send_error(request, "500 Internal Server Error", esp_err_to_name(store_error));
     const esp_err_t error = display::clear();
     if (error != ESP_OK) return send_error(request, "500 Internal Server Error", esp_err_to_name(error));
     cJSON *root = cJSON_CreateObject();
@@ -152,12 +155,18 @@ esp_err_t handle_upload_image(httpd_req_t *request)
     case image::Format::png: decode_error = image::decode_png(upload, received, decoded); break;
     case image::Format::bmp: decode_error = image::decode_bmp(upload, received, decoded); break;
     }
-    heap_caps_free(upload);
     if (decode_error != ESP_OK) {
+        heap_caps_free(upload);
         const char *message = decode_error == ESP_ERR_NO_MEM ? "Not enough memory to decode image" :
             "Image is malformed, unsupported, or exceeds 480x480 pixels";
         const char *status = decode_error == ESP_ERR_NO_MEM ? "503 Service Unavailable" : "400 Bad Request";
         return send_error(request, status, message);
+    }
+    const esp_err_t store_error = image_store::save(upload, received, fit);
+    heap_caps_free(upload);
+    if (store_error != ESP_OK) {
+        image::release(decoded);
+        return send_error(request, "500 Internal Server Error", "Image could not be saved to flash");
     }
     const esp_err_t display_error = display::show_rgb565(decoded.pixels, decoded.width, decoded.height, fit);
     const int width = decoded.width;
