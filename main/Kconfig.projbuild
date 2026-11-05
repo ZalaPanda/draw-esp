@@ -1,0 +1,22 @@
+menu "ESP32 Network Image Display"
+
+config APP_AP_PASSWORD
+    string "SoftAP password override"
+    default ""
+    help
+        Optional 8-63 byte WPA2 password. Leave empty to use a password
+        derived from this device's factory MAC address.
+
+config APP_STA_SSID
+    string "Initial station SSID"
+    default ""
+    help
+        Optional initial 2.4 GHz Wi-Fi network. Saved to NVS on first boot.
+
+config APP_STA_PASSWORD
+    string "Initial station password"
+    default ""
+    help
+        Password for the initial station network. Saved to NVS on first boot.
+
+endmenu

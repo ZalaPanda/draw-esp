@@ -1,5 +1,7 @@
 #include "display/display_driver.h"
 #include "input/brightness_button.h"
+#include "network/network_api.h"
+#include "network/network_manager.h"
 #include "system/board_config.h"
 #include "system/power_management.h"
 #include "esp_check.h"
@@ -8,6 +10,14 @@
 
 namespace {
 constexpr char kTag[] = "draw-esp";
+
+void on_power_key_short_press()
+{
+    const esp_err_t error = network::toggle_ap();
+    if (error != ESP_OK) {
+        ESP_LOGE(kTag, "PWR short-press AP toggle failed: %s", esp_err_to_name(error));
+    }
+}
 }
 
 extern "C" void app_main(void)
@@ -24,6 +34,13 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(display::initialize());
     ESP_ERROR_CHECK(display::show_test_pattern());
     ESP_LOGI(kTag, "Stage 1 ready: RGB565 color bars, center cross and grayscale at 20%% brightness");
+
+    ESP_ERROR_CHECK(network::initialize());
+    ESP_ERROR_CHECK(network::start_http_api());
+    ESP_LOGI(kTag, "Stage 3 ready: AP+STA, persistent Wi-Fi credentials, reconnect and mDNS");
+    ESP_ERROR_CHECK(power_management::start_power_key_monitor(on_power_key_short_press));
+    ESP_LOGI(kTag, "Stage 2 ready: PWR short press toggles AP; long-press PMIC behavior is unchanged");
+
     ESP_ERROR_CHECK(input::start_brightness_button());
     ESP_LOGI(kTag, "Stage 1A ready: user button cycles brightness by -10%%, wrapping 0%% to 100%%");
 }

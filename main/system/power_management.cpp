@@ -5,6 +5,8 @@
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace {
 constexpr char kTag[] = "power";
@@ -13,15 +15,51 @@ constexpr uint8_t kChipIdRegister = 0x03;
 constexpr uint8_t kChipId = 0x4A;
 constexpr uint8_t kAdcControlRegister = 0x30;
 constexpr uint8_t kVoltageAdcChannels = 0x0D;
+constexpr uint8_t kIrqEnableRegister = 0x41;
+constexpr uint8_t kIrqStatusRegister = 0x49;
+constexpr uint8_t kPowerKeyShortPress = 1U << 3;
 constexpr int kTimeoutMs = 1000;
 i2c_master_bus_handle_t bus = nullptr;
 i2c_master_dev_handle_t pmic = nullptr;
+bool power_key_monitor_started = false;
+void (*power_key_short_press_callback)() = nullptr;
 
 esp_err_t read_register(uint8_t reg, uint8_t &value)
 {
     ESP_RETURN_ON_ERROR(i2c_master_transmit_receive(pmic, &reg, 1, &value, 1, kTimeoutMs),
                         kTag, "AXP2101 register 0x%02x read failed", reg);
     return ESP_OK;
+}
+
+esp_err_t write_register(uint8_t reg, uint8_t value)
+{
+    const uint8_t command[] = {reg, value};
+    return i2c_master_transmit(pmic, command, sizeof(command), kTimeoutMs);
+}
+
+void power_key_task(void *)
+{
+    unsigned read_failures = 0;
+    for (;;) {
+        uint8_t status = 0;
+        const esp_err_t read_error = read_register(kIrqStatusRegister, status);
+        if (read_error != ESP_OK) {
+            if ((read_failures++ % 40) == 0) {
+                ESP_LOGW(kTag, "PWR-key IRQ read failed: %s", esp_err_to_name(read_error));
+            }
+        } else if ((status & kPowerKeyShortPress) != 0) {
+            read_failures = 0;
+            // AXP2101 IRQ status is write-one-to-clear. Clear only our bit and
+            // leave unrelated pending PMIC events untouched.
+            const esp_err_t clear_error = write_register(kIrqStatusRegister, kPowerKeyShortPress);
+            if (clear_error != ESP_OK) {
+                ESP_LOGE(kTag, "PWR-key IRQ clear failed: %s", esp_err_to_name(clear_error));
+            } else if (power_key_short_press_callback != nullptr) {
+                power_key_short_press_callback();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
 }
 }
 
@@ -62,6 +100,45 @@ esp_err_t initialize()
                         kTag, "Voltage ADC configuration did not read back correctly");
 
     ESP_LOGI(kTag, "AXP2101 detected at 0x34; voltage ADCs enabled, existing power settings preserved");
+    return ESP_OK;
+}
+
+esp_err_t start_power_key_monitor(void (*on_short_press)())
+{
+    ESP_RETURN_ON_FALSE(pmic != nullptr, ESP_ERR_INVALID_STATE, kTag, "PMIC is not initialized");
+    ESP_RETURN_ON_FALSE(!power_key_monitor_started, ESP_ERR_INVALID_STATE, kTag,
+                        "PWR-key monitor already started");
+    ESP_RETURN_ON_FALSE(on_short_press != nullptr, ESP_ERR_INVALID_ARG, kTag,
+                        "PWR-key callback is required");
+
+    uint8_t irq_enable = 0;
+    ESP_RETURN_ON_ERROR(read_register(kIrqEnableRegister, irq_enable), kTag,
+                        "PWR-key IRQ enable read failed");
+    const uint8_t updated_irq_enable = irq_enable | kPowerKeyShortPress;
+    if (updated_irq_enable != irq_enable) {
+        ESP_RETURN_ON_ERROR(write_register(kIrqEnableRegister, updated_irq_enable), kTag,
+                            "PWR-key short-press IRQ enable failed");
+        ESP_RETURN_ON_ERROR(read_register(kIrqEnableRegister, irq_enable), kTag,
+                            "PWR-key IRQ enable verification failed");
+        ESP_RETURN_ON_FALSE((irq_enable & kPowerKeyShortPress) != 0, ESP_ERR_INVALID_RESPONSE,
+                            kTag, "PWR-key IRQ enable did not read back");
+    }
+
+    // Discard a short-press latch that may have been set before the monitor
+    // started, so boot-time handling cannot toggle AP unexpectedly.
+    uint8_t pending_status = 0;
+    ESP_RETURN_ON_ERROR(read_register(kIrqStatusRegister, pending_status), kTag,
+                        "PWR-key pending IRQ read failed");
+    if ((pending_status & kPowerKeyShortPress) != 0) {
+        ESP_RETURN_ON_ERROR(write_register(kIrqStatusRegister, kPowerKeyShortPress), kTag,
+                            "Stale PWR-key IRQ clear failed");
+    }
+
+    power_key_short_press_callback = on_short_press;
+    ESP_RETURN_ON_FALSE(xTaskCreate(power_key_task, "pwr-key", 3072, nullptr, 4, nullptr) == pdPASS,
+                        ESP_ERR_NO_MEM, kTag, "PWR-key monitor task creation failed");
+    power_key_monitor_started = true;
+    ESP_LOGI(kTag, "AXP2101 PWR short-press monitor ready (25 ms I2C polling)");
     return ESP_OK;
 }
 }

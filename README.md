@@ -72,6 +72,7 @@ Implementation sources inspected:
 - [BSP pin definitions](https://github.com/waveshareteam/Waveshare-ESP32-components/blob/23a6012d5e87d27399cf90fb851cab3689e29159/bsp/esp32_s3_touch_amoled_2_16/include/bsp/esp32_s3_touch_amoled_2_16.h)
 - [Official PSRAM defaults](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/examples/esp-idf/02_lvgl_demo_v9/sdkconfig.defaults)
 - [Official PMIC example](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/examples/esp-idf/01_AXP2101/main/port_axp2101.cpp) and its [register definitions](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/examples/esp-idf/01_AXP2101/components/XPowersLib/src/REG/AXP2101Constants.h)
+- [AXP2101 software datasheet](https://files.waveshare.com/wiki/common/X-power-AXP2101_SWcharge_V1.0.pdf), including the short-press enable and write-one-to-clear IRQ status registers
 - [Waveshare GPIO pin assignments](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16#gpio-pin-assignments), including GPIO18/KEY3 wiring and pressed polarity
 
 The schematic labels an AXP IRQ net but does not establish a normal ESP32 GPIO interrupt connection; the official ESP-IDF PMIC example defaults its interrupt pin to `-1`. PWR-button timing, short-press reporting and safe behavior remain Stage 2 prerequisites. Stage 1 does not register PMIC interrupts or change power-button behavior.
@@ -179,6 +180,7 @@ The device must support simultaneous Wi-Fi Access Point and Station modes.
 - Use WPA2-PSK.
 - Use a configurable, unique password.
 - The HTTP server and web interface must be accessible through the AP.
+- If STA credentials are already configured, leave the AP off at startup; the PWR button can enable it when needed.
 
 ### AP power-button control — IMPORTANT
 
@@ -208,9 +210,9 @@ If the PWR button cannot safely be used for this purpose because of hardware lim
 ### Startup behavior
 
 - Start the STA connection process at boot if credentials are configured.
-- Start AP by default so that the device remains discoverable and configurable.
-- A missing or unavailable STA network must not prevent AP operation.
-- AP state may be controlled at runtime through the physical button.
+- If STA credentials are configured, start in STA-only mode and leave AP off, regardless of whether the router is reachable.
+- If no STA credentials are configured, start AP so that the device remains discoverable and configurable.
+- The physical PWR button can enable or disable AP at runtime. When STA credentials are configured, enabling AP uses AP+STA mode and preserves STA operation.
 - Avoid blocking the main application while connecting to Wi-Fi.
 
 ## 7. HTTP server and REST API
@@ -389,9 +391,9 @@ Do not implement any of these in the initial version.
 
 Work incrementally.
 
-### Stage 1 implementation
+### Stage 1–3 implementation
 
-The project implements board initialization (Stage 1) and user-button brightness control (Stage 1A). Networking, PWR-button input, HTTP, image decoding and touch are not initialized.
+The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), and AP + STA networking (Stage 3). A small HTTP API for device/network status and Wi-Fi/AP setup is included to make Stage 3 configurable. Image upload, image decoding, a static web interface, and touch are not implemented.
 
 - `main/system/board_config.h` isolates verified board pins and memory/display sizes.
 - `main/system/power_management.cpp` uses native ESP-IDF I2C to verify the AXP2101 and enable voltage ADCs with read-modify-write and readback. Existing regulator voltages/enables, charger/temperature-sensor settings, interrupts and PWR-key behavior are deliberately preserved. The official display example likewise does not reprogram the display supply. This is not a battery-charging policy or power-control implementation.
@@ -416,6 +418,22 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 - `display::decrease_brightness()` is the single owner of brightness state; it sends the CO5300 brightness command and updates the tracked value only on success. Failures are logged; release and press again to retry. There are no other runtime display writers at this stage; future network/display work must serialize access before introducing concurrent writers.
 - 0% sets the brightness register to zero without powering off the board or discarding the image. The next press wraps directly to 100%, as requested. This is not panel sleep, an idle timeout or automatic burn-in protection; avoid prolonged static content at high brightness.
 - PWR remains reserved for Stage 2 AP control. No PMIC power-button, charging or regulator behavior is changed.
+
+### Stage 2 implementation: AXP2101 PWR button
+
+- On this board the physical PWR switch connects to the AXP2101, not an ESP32 GPIO. The AXP2101 IRQ output is not wired to a usable ESP32 input, so firmware polls the PMIC's latched status over the existing I²C bus.
+- `main/system/power_management.cpp` enables only the AXP2101 POWERON short-press IRQ (register `0x41`, bit 3) with read-modify-write. A dedicated task checks IRQ status register `0x49` every 25 ms and writes one to bit 3 to clear only that event. Other pending PMIC status bits are left untouched.
+- A short press toggles the AP without restarting the device. With STA credentials configured, disabling AP switches Wi-Fi to STA mode; without credentials, Wi-Fi enters null mode. Re-enabling AP restores AP or AP+STA mode. Display and application tasks are not restarted.
+- The driver does not change long-press thresholds, power-off configuration, PMIC rails, or charging settings. The AXP2101 retains its existing long-press power behavior. Physical short-press and long-press interaction still requires board validation.
+
+### Stage 3 implementation: AP + STA and network setup API
+
+- `main/network/network_manager.cpp` initializes STA-only mode when STA credentials are available, otherwise AP mode. It does not wait for a connection before deciding whether to start AP. The PWR button can enable AP later, switching to AP+STA while preserving STA. The default SSID is `ESP32-Display-XXXX`, derived from the SoftAP MAC, with WPA2-PSK and the default AP address `192.168.4.1`.
+- Wi-Fi startup selects AP or AP+STA mode before applying interface-specific configurations. Runtime mode changes use the same ordering so ESP-IDF has the AP/STA interface enabled before `esp_wifi_set_config()` is called.
+- The default AP password is derived from the full factory Wi-Fi MAC and saved in NVS. It is printed in the USB serial boot log for initial setup. `APP_AP_PASSWORD` in project configuration can supply a custom initial password; `POST /api/ap/password` changes and persists it. The AP password is never included in API responses.
+- `APP_STA_SSID` and `APP_STA_PASSWORD` can seed initial station credentials through `menuconfig`; the firmware stores them in NVS on first boot. `POST /api/wifi` and `DELETE /api/wifi` set or remove credentials at runtime. STA reconnect attempts use a five-second retry timer, and a missing STA network does not stop AP operation.
+- mDNS advertises `esp32-display.local` and the HTTP service. The HTTP server is reachable through AP and STA. Implemented routes are `GET /`, `GET /api/device`, `GET /api/network`, `POST /api/wifi`, `DELETE /api/wifi`, and `POST /api/ap/password`. `/` currently returns plain-text setup help; a static web interface and the image API remain future work.
+- Credential and AP-password changes use the documented HTTP API over the local AP or LAN. Use a trusted network; the initial API is HTTP and does not provide TLS or user accounts. The setup password is available in the USB serial boot log.
 
 The build includes compile-time assertions for the complete 11-step brightness cycle. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
 
@@ -452,7 +470,11 @@ A successful build verifies compilation and configuration, not physical panel op
 
 Software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build and Stage 1A compile-time logic tests pass. The firmware image with brightness-button control is 255,184 bytes, leaving 76% of the temporary 1 MB app partition free. Generated configuration checks confirm octal PSRAM at 80 MHz with boot memory test, 240 MHz CPU, USB Serial/JTAG console, 16 MB flash, no LVGL dependency and no Secure Boot/Flash Encryption enablement. ESP-IDF itself emits existing Kconfig/dependency warnings; these are not firmware compilation errors.
 
+Stage 2–3 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes after correcting Wi-Fi initialization ordering and skipping AP configuration in STA-only mode. The startup mode is selected before applying configurations for enabled interfaces, avoiding `ESP_ERR_WIFI_MODE` during SoftAP setup. With configured STA credentials, startup is STA-only and does not depend on connection success. The firmware binary is 964,048 bytes; the current 1 MiB app partition has 84,528 bytes (about 8%) free. Physical network and PWR-button acceptance remains pending after an approved flash.
+
 Stage 1A physical acceptance after an approved flash: confirm successive GPIO18 presses give `10%, 0%, 100%, 90%` starting from 20%, continue through the full cycle, hold the button to verify no repeat, and reboot to confirm the default returns to 20%. Confirm the image is retained at 0% and reappears on the next press, and that BOOT/PWR are not used for dimming. Physical debounce and panel-brightness behavior remain pending board validation.
+
+Stage 2–3 physical acceptance after an approved flash: confirm a short PWR press alternates AP on/off, a held PWR press does not toggle repeatedly, and the existing PMIC long-press power-off still behaves as before. Configure STA credentials, verify connection and DHCP, disable AP and confirm the STA connection and HTTP API remain available, then re-enable AP and verify `192.168.4.1`. Verify reconnect after router loss and confirm saved credentials survive reboot. Confirm `esp32-display.local` resolution on the local network. These checks are not complete until performed on the board.
 
 Before coding:
 
@@ -481,13 +503,13 @@ Then implement in small, independently testable stages:
 - Keep PWR dedicated to the planned AP toggle.
 - Build/test the cycle and debounce logic, then verify on hardware after flash approval.
 
-### Stage 2 — Physical input
+### Stage 2 — Physical input (implemented; physical acceptance pending)
 
 - Identify the PWR button event.
 - Implement safe AP toggle behavior.
 - Verify that the display and STA connection remain operational.
 
-### Stage 3 — Networking
+### Stage 3 — Networking (implemented; physical acceptance pending)
 
 - Implement AP + STA.
 - Persist Wi-Fi credentials.
@@ -496,7 +518,7 @@ Then implement in small, independently testable stages:
 
 ### Stage 4 — HTTP server
 
-- Implement the REST endpoints.
+- Complete the remaining REST endpoints, including image upload and display clear.
 - Serve a minimal static page.
 - Test access through both AP and STA.
 
@@ -505,6 +527,7 @@ Then implement in small, independently testable stages:
 - Implement JPEG decoding first.
 - Implement image fitting modes.
 - Add PNG and BMP.
+- Add automatic image rotation based on device orientation using the onboard QMI8658 IMU. Use accelerometer readings to determine the stable orientation and rotate image content by 90° when needed; use hysteresis or a stability threshold to prevent flicker near orientation boundaries. The IMU is on the shared I²C bus (GPIO14/15), and its driver/initialization must be verified before implementation.
 - Test malformed images and memory limits.
 
 ### Stage 6 — Integration and documentation

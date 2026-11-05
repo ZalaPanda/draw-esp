@@ -7,7 +7,7 @@ GitHub [link](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/m
 ESP-IDF Terminal:
 
 ```pwsh
-PS> & 'C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1'
+PS> & C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1
 IDF PowerShell Environment
 -------------------------
 Environment variables set:
@@ -22,6 +22,9 @@ espefuse.py
 espsecure.py
 otatool.py
 parttool.py
+
+PS> idf.py -p COM4 monitor
+press Ctrl+T, then Ctrl+R to reset the board
 ```
 
 `ESP-IDF` `6.1` = Espressif (SDK)  
@@ -42,3 +45,16 @@ Flash Encryption: `SPI_BOOT_CRYPT_CNT = 0`
 Download mode: `DIS_DOWNLOAD_MODE = False`  
 USB Serial/JTAG: `DIS_USB_SERIAL_JTAG = False`  
 Secure version: `SECURE_VERSION = 0`  
+
+```pwsh
+# get network status
+Invoke-RestMethod -Uri "http://192.168.4.1/api/network"
+
+# set AP password
+$body = @{ password = "your-ap-password" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://192.168.4.1/api/ap/password" -Method Post -ContentType "application/json" -Body $body
+
+# set STA ssid and password
+$body = @{ ssid = "HomeWifi"; password = "your-router-password" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://192.168.4.1/api/wifi" -Method Post -ContentType "application/json" -Body $body
+```

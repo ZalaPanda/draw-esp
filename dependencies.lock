@@ -1,4 +1,14 @@
 dependencies:
+  espressif/cjson:
+    component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.19~2
   espressif/cmake_utilities:
     component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
     dependencies:
@@ -23,13 +33,25 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.2.0
+  espressif/mdns:
+    component_hash: ae75315ecdc03357e40b490cf5b3e8177f98c184236dd93a0e4c6647a18fed67
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.15.0
   idf:
     source:
       type: idf
     version: 6.1.0
 direct_dependencies:
+- espressif/cjson
 - espressif/esp_lcd_co5300
+- espressif/mdns
 - idf
-manifest_hash: 98ab1617163f1c97b51f70efc4659621d22e02eb6e9c9d572a68debf126e9597
+manifest_hash: b257ebacfe09240608cfe6f29e17c73c574c580e42e7c3d07105d6c2386a342a
 target: esp32s3
 version: 3.0.0
