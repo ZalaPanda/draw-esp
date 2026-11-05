@@ -52,6 +52,11 @@ const co5300_lcd_init_cmd_t kInitCommands[] = {
 };
 esp_lcd_panel_handle_t panel = nullptr;
 uint16_t *framebuffer = nullptr;
+uint16_t *source_image = nullptr;
+int source_width = 0;
+int source_height = 0;
+display::FitMode source_fit = display::FitMode::contain;
+display::Rotation current_rotation = display::Rotation::deg0;
 uint8_t *transfer_buffer = nullptr;
 SemaphoreHandle_t transfer_done = nullptr;
 SemaphoreHandle_t display_mutex = nullptr;
@@ -104,6 +109,53 @@ esp_err_t flush_framebuffer()
                             ESP_ERR_TIMEOUT, kTag, "DMA completion timed out at y=%d", y);
     }
     return ESP_OK;
+}
+
+void render_source()
+{
+    const bool quarter_turn = current_rotation == display::Rotation::deg90 ||
+                              current_rotation == display::Rotation::deg270;
+    const int width = quarter_turn ? source_height : source_width;
+    const int height = quarter_turn ? source_width : source_height;
+    const auto pixel_at = [&](int x, int y) -> uint16_t {
+        int sx = x;
+        int sy = y;
+        switch (current_rotation) {
+        case display::Rotation::deg90: sx = y; sy = source_height - 1 - x; break;
+        case display::Rotation::deg180: sx = source_width - 1 - x; sy = source_height - 1 - y; break;
+        case display::Rotation::deg270: sx = source_width - 1 - y; sy = x; break;
+        case display::Rotation::deg0: break;
+        }
+        return source_image[sy * source_width + sx];
+    };
+    std::memset(framebuffer, 0, kFramePixels * sizeof(uint16_t));
+    if (source_fit == display::FitMode::stretch) {
+        for (int y = 0; y < board::kDisplayHeight; ++y) {
+            const int sy = static_cast<int>((static_cast<int64_t>(y) * height) / board::kDisplayHeight);
+            for (int x = 0; x < board::kDisplayWidth; ++x) {
+                const int sx = static_cast<int>((static_cast<int64_t>(x) * width) / board::kDisplayWidth);
+                framebuffer[y * board::kDisplayWidth + x] = pixel_at(sx, sy);
+            }
+        }
+    } else {
+        const double scale = source_fit == display::FitMode::contain
+            ? std::min(static_cast<double>(board::kDisplayWidth) / width,
+                       static_cast<double>(board::kDisplayHeight) / height)
+            : std::max(static_cast<double>(board::kDisplayWidth) / width,
+                       static_cast<double>(board::kDisplayHeight) / height);
+        const int scaled_width = std::max(1, static_cast<int>(width * scale));
+        const int scaled_height = std::max(1, static_cast<int>(height * scale));
+        const int offset_x = (board::kDisplayWidth - scaled_width) / 2;
+        const int offset_y = (board::kDisplayHeight - scaled_height) / 2;
+        for (int y = 0; y < board::kDisplayHeight; ++y) {
+            const int sy = static_cast<int>((static_cast<int64_t>(y - offset_y) * height) / scaled_height);
+            if (sy < 0 || sy >= height) continue;
+            for (int x = 0; x < board::kDisplayWidth; ++x) {
+                const int sx = static_cast<int>((static_cast<int64_t>(x - offset_x) * width) / scaled_width);
+                if (sx >= 0 && sx < width) framebuffer[y * board::kDisplayWidth + x] = pixel_at(sx, sy);
+            }
+        }
+    }
 }
 static_assert(gray_rgb565(0) == 0x0000);
 static_assert(gray_rgb565(255) == 0xFFFF);
@@ -205,37 +257,36 @@ esp_err_t show_rgb565(const uint16_t *pixels, int width, int height, FitMode fit
     ESP_RETURN_ON_FALSE(pixels != nullptr && width > 0 && height > 0, ESP_ERR_INVALID_ARG, kTag,
                         "Invalid source image");
     xSemaphoreTake(display_mutex, portMAX_DELAY);
-    std::memset(framebuffer, 0, kFramePixels * sizeof(uint16_t));
-
-    if (fit == FitMode::stretch) {
-        for (int y = 0; y < board::kDisplayHeight; ++y) {
-            const int sy = static_cast<int>((static_cast<int64_t>(y) * height) / board::kDisplayHeight);
-            for (int x = 0; x < board::kDisplayWidth; ++x) {
-                const int sx = static_cast<int>((static_cast<int64_t>(x) * width) / board::kDisplayWidth);
-                framebuffer[y * board::kDisplayWidth + x] = pixels[sy * width + sx];
-            }
-        }
-    } else {
-        const double scale = fit == FitMode::contain
-            ? std::min(static_cast<double>(board::kDisplayWidth) / width,
-                       static_cast<double>(board::kDisplayHeight) / height)
-            : std::max(static_cast<double>(board::kDisplayWidth) / width,
-                       static_cast<double>(board::kDisplayHeight) / height);
-        const int scaled_width = std::max(1, static_cast<int>(width * scale));
-        const int scaled_height = std::max(1, static_cast<int>(height * scale));
-        const int offset_x = (board::kDisplayWidth - scaled_width) / 2;
-        const int offset_y = (board::kDisplayHeight - scaled_height) / 2;
-        for (int y = 0; y < board::kDisplayHeight; ++y) {
-            const int sy = static_cast<int>((static_cast<int64_t>(y - offset_y) * height) / scaled_height);
-            if (sy < 0 || sy >= height) continue;
-            for (int x = 0; x < board::kDisplayWidth; ++x) {
-                const int sx = static_cast<int>((static_cast<int64_t>(x - offset_x) * width) / scaled_width);
-                if (sx >= 0 && sx < width) framebuffer[y * board::kDisplayWidth + x] = pixels[sy * width + sx];
-            }
-        }
+    auto *replacement = static_cast<uint16_t *>(heap_caps_malloc(
+        static_cast<size_t>(width) * height * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (replacement == nullptr) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_NO_MEM;
     }
+    std::memcpy(replacement, pixels, static_cast<size_t>(width) * height * sizeof(uint16_t));
+    if (source_image != nullptr) heap_caps_free(source_image);
+    source_image = replacement;
+    source_width = width;
+    source_height = height;
+    source_fit = fit;
+    render_source();
     esp_err_t error = flush_framebuffer();
     if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+    xSemaphoreGive(display_mutex);
+    return error;
+}
+
+esp_err_t set_rotation(Rotation rotation)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    current_rotation = rotation;
+    esp_err_t error = ESP_OK;
+    if (source_image != nullptr) {
+        render_source();
+        error = flush_framebuffer();
+        if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+    }
     xSemaphoreGive(display_mutex);
     return error;
 }
@@ -245,6 +296,11 @@ esp_err_t clear()
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
     xSemaphoreTake(display_mutex, portMAX_DELAY);
     std::memset(framebuffer, 0, kFramePixels * sizeof(uint16_t));
+    if (source_image != nullptr) {
+        heap_caps_free(source_image);
+        source_image = nullptr;
+        source_width = source_height = 0;
+    }
     const esp_err_t error = flush_framebuffer();
     xSemaphoreGive(display_mutex);
     return error;

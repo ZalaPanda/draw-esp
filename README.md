@@ -395,7 +395,7 @@ Work incrementally.
 
 ### Stage 1–4 implementation
 
-The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), the Stage 4 web/status/clear interface, and JPEG/PNG/BMP decode and render support (Stage 5). Touch and IMU-based orientation are not implemented yet.
+The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), the Stage 4 web/status/clear interface, and JPEG/PNG/BMP decode, render, and QMI8658-based orientation support (Stage 5). Touch is not implemented.
 
 - `main/system/board_config.h` isolates verified board pins and memory/display sizes.
 - `main/system/power_management.cpp` uses native ESP-IDF I2C to verify the AXP2101 and enable voltage ADCs with read-modify-write and readback. Existing regulator voltages/enables, charger/temperature-sensor settings, interrupts and PWR-key behavior are deliberately preserved. The official display example likewise does not reprogram the display supply. This is not a battery-charging policy or power-control implementation.
@@ -447,8 +447,10 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 
 - `main/image/jpeg_decoder.cpp` uses Espressif's `esp_jpeg` component. It inspects JPEG dimensions before allocating decoded output and selects the largest decoder scale that keeps the result at or below 480 × 480. The compressed request and decoded RGB565 pixels use PSRAM; decoded memory is capped at one display frame.
 - `display::show_rgb565()` serializes against brightness and clear operations, applies `contain`, `cover`, or `stretch` using nearest-neighbor sampling into the existing framebuffer, flushes the frame, then enables the panel.
+- The display retains a PSRAM copy of the latest decoded image so orientation changes can redraw it without another upload. `clear()` releases that copy; the retained image is volatile and is not written to flash.
 - `POST /api/image` decodes JPEG, PNG, and BMP and returns width, height, format, and fit on success. PNG and BMP inputs are limited to 480 × 480 pixels to bound decoder memory. PNG transparency is composited onto black. BMP support is limited to uncompressed 24-bit and 32-bit files; palette, bitfield-compressed, and other encodings are rejected. Progressive JPEG support follows the limits of the bundled decoder and may be rejected as malformed. Uploads remain transient and are not saved to flash.
-- Still pending in Stage 5: QMI8658 initialization and stable-orientation rotation. The QMI8658 component is declared as a dependency, but no sensor calls are made until its API and board initialization are verified.
+- `main/input/orientation.cpp` initializes the QMI8658 at address `0x6B` on the PMIC module's existing 400 kHz GPIO14/15 I²C bus. It samples accelerometer data every 100 ms and accepts a new orientation after eight consecutive samples with at least 0.70 g on a dominant in-plane axis. Face-up/down and diagonal positions retain the last orientation, providing hysteresis against boundary flicker. The accelerometer runs at 125 Hz in ±4 g range; the gyroscope is left disabled. The managed driver 2.0.2 header declares `qmi8658_read_accel_mps2()`, but that version does not define it, so the firmware uses the implemented `qmi8658_read_accel()` with m/s² units enabled.
+- Orientation is applied in software before fitting, so all three fit modes rotate with the display while panel initialization stays fixed. The mapping assumes the sensor X/Y axes lie in the display plane: +Y is 0°, −X is 90°, −Y is 180°, and +X is 270°. Confirm the physical mapping and stability on the board; sensor-axis mounting and orientation cannot be confirmed by a host build.
 
 The build includes compile-time assertions for the complete 11-step brightness cycle. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
 
@@ -489,7 +491,7 @@ Stage 2–3 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build pas
 
 Stage 4 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes with the embedded web page and image clear/upload routes. The firmware binary is 968,272 bytes; 80,304 bytes (about 8%) remain in the temporary 1 MiB app partition. VS Code reports no diagnostics in the modified display and API sources. Image upload intentionally returns HTTP 501 after type/signature validation until Stage 5 adds decoding. AP/STA browser access and physical display clearing remain pending hardware acceptance.
 
-Stage 5 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes with JPEG, PNG, and BMP decoding, bounded PSRAM upload/output buffers, RGB565 fitting, and the large single-app bring-up partition. The firmware binary is 1,058,976 bytes; the `0x177000` app partition leaves 476,000 bytes (31%) free. PNG/BMP decode and physical upload/render validation remain pending an approved flash; IMU rotation remains unimplemented.
+Stage 5 software validation: the ESP-IDF 6.1 ESP32-S3 build passes with JPEG, PNG, and BMP decoding, bounded PSRAM buffers, RGB565 fitting, and QMI8658 orientation/redraw support. The firmware binary is 0x103700 bytes; the 0x177000 app partition leaves 0x73900 bytes (31%) free. Physical sensor-axis, PNG/BMP decode, upload, and render validation remain pending an approved flash.
 
 Stage 1A physical acceptance after an approved flash: confirm successive GPIO18 presses give `10%, 0%, 100%, 90%` starting from 20%, continue through the full cycle, hold the button to verify no repeat, and reboot to confirm the default returns to 20%. Confirm the image is retained at 0% and reappears on the next press, and that BOOT/PWR are not used for dimming. Physical debounce and panel-brightness behavior remain pending board validation.
 
@@ -544,7 +546,7 @@ Then implement in small, independently testable stages:
 
 - Implemented: JPEG decoding and `contain`, `cover`, and `stretch` fitting.
 - Implemented: PNG decoding with transparent pixels composited onto black, and uncompressed 24/32-bit BMP decoding. PNG and BMP dimensions are limited to 480 × 480; BMP palettes and compression modes are not supported.
-- Remaining: automatic image rotation using the onboard QMI8658. Verify the driver/API and shared I²C initialization (GPIO14/15), then use stable accelerometer orientation with hysteresis to avoid boundary flicker.
+- Implemented: automatic image rotation using the onboard QMI8658 over the shared I²C bus, with stable accelerometer classification and hysteresis. Confirm the assumed sensor-to-display axis mapping on hardware.
 - Validate malformed images and memory limits on the board after approved firmware installation.
 
 ### Stage 6 — Integration and documentation

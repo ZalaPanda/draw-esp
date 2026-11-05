@@ -1,5 +1,6 @@
 #include "display/display_driver.h"
 #include "input/brightness_button.h"
+#include "input/orientation.h"
 #include "network/network_api.h"
 #include "network/network_manager.h"
 #include "system/board_config.h"
@@ -43,4 +44,7 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(input::start_brightness_button());
     ESP_LOGI(kTag, "Stage 1A ready: user button cycles brightness by -10%%, wrapping 0%% to 100%%");
+
+    ESP_ERROR_CHECK(input::start_orientation_monitor());
+    ESP_LOGI(kTag, "Stage 5 ready: QMI8658 stable-orientation image rotation enabled");
 }
