@@ -1,5 +1,7 @@
 # Project: ESP32-S3 AMOLED Network Image Display
 
+![Real-life-photo](photo.png)
+
 ## 1. Project goal
 
 Develop custom firmware for the Waveshare ESP32-S3-Touch-AMOLED-2.16 development board.
@@ -393,7 +395,7 @@ Work incrementally.
 
 ### Stage 1–4 implementation
 
-The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), the Stage 4 web/status/clear interface, and the initial JPEG decode/render slice of Stage 5. Touch, PNG/BMP decoding, and IMU-based orientation are not implemented yet.
+The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), the Stage 4 web/status/clear interface, and JPEG/PNG/BMP decode and render support (Stage 5). Touch and IMU-based orientation are not implemented yet.
 
 - `main/system/board_config.h` isolates verified board pins and memory/display sizes.
 - `main/system/power_management.cpp` uses native ESP-IDF I2C to verify the AXP2101 and enable voltage ADCs with read-modify-write and readback. Existing regulator voltages/enables, charger/temperature-sensor settings, interrupts and PWR-key behavior are deliberately preserved. The official display example likewise does not reprogram the display supply. This is not a battery-charging policy or power-control implementation.
@@ -402,7 +404,7 @@ The project implements board initialization (Stage 1), user-button brightness co
 - A 460,800-byte native-order RGB565 framebuffer is allocated in PSRAM. A single 15,360-byte internal DMA staging buffer sends 16-row stripes in panel-required big-endian pixel order. Each transfer waits for its completion callback with a bounded timeout before reusing the buffer. Buffers remain allocated for the application's lifetime; allocation, bus, panel and transfer failures are logged and fatal during bring-up.
 - The panel is blanked while uploading the pattern, then enabled at 20% brightness. The pattern contains white/yellow/cyan/green/magenta/red/blue/black bars, a white center cross and a lower grayscale ramp. Its square-frame corners are naturally clipped by the circular visible display. Initialization delays and transfer waits occur only during startup; there is no polling or busy main loop. Stage 1 does not yet provide continuous updates or tearing synchronization.
 
-The generated default partition table remains temporary: NVS at `0x9000` (24 KB), PHY data at `0xf000` (4 KB), and a 1 MB factory application at `0x10000`. This is sufficient for board bring-up; the remaining 16 MB flash is not allocated for application data yet. OTA and filesystem partitions will be designed when their requirements are implemented.
+The generated default partition table remains temporary: NVS at `0x9000` (24 KB), PHY data at `0xf000` (4 KB), and a large single factory application at `0x10000`. This leaves room for the current decoder and networking dependencies during board bring-up; the remaining 16 MB flash is not allocated for application data yet. OTA and filesystem partitions will be designed when their requirements are implemented.
 
 ### Stage 1A implementation: manual brightness
 
@@ -445,8 +447,8 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 
 - `main/image/jpeg_decoder.cpp` uses Espressif's `esp_jpeg` component. It inspects JPEG dimensions before allocating decoded output and selects the largest decoder scale that keeps the result at or below 480 × 480. The compressed request and decoded RGB565 pixels use PSRAM; decoded memory is capped at one display frame.
 - `display::show_rgb565()` serializes against brightness and clear operations, applies `contain`, `cover`, or `stretch` using nearest-neighbor sampling into the existing framebuffer, flushes the frame, then enables the panel.
-- `POST /api/image` now decodes JPEG and returns width, height, format, and fit on success. PNG/BMP currently return HTTP 501. Progressive JPEG support follows the limits of the bundled decoder and may be rejected as malformed. Uploads remain transient and are not saved to flash.
-- Still pending in Stage 5: PNG and BMP decoders, QMI8658 initialization and stable-orientation rotation. The QMI8658 component is declared as a dependency, but no sensor calls are made until its API and board initialization are verified.
+- `POST /api/image` decodes JPEG, PNG, and BMP and returns width, height, format, and fit on success. PNG and BMP inputs are limited to 480 × 480 pixels to bound decoder memory. PNG transparency is composited onto black. BMP support is limited to uncompressed 24-bit and 32-bit files; palette, bitfield-compressed, and other encodings are rejected. Progressive JPEG support follows the limits of the bundled decoder and may be rejected as malformed. Uploads remain transient and are not saved to flash.
+- Still pending in Stage 5: QMI8658 initialization and stable-orientation rotation. The QMI8658 component is declared as a dependency, but no sensor calls are made until its API and board initialization are verified.
 
 The build includes compile-time assertions for the complete 11-step brightness cycle. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
 
@@ -481,13 +483,13 @@ After approval, hardware acceptance consists of:
 
 A successful build verifies compilation and configuration, not physical panel operation or PWR-button safety. Hardware acceptance remains pending until an approved flash and board test.
 
-Software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build and Stage 1A compile-time logic tests pass. The firmware image with brightness-button control is 255,184 bytes, leaving 76% of the temporary 1 MB app partition free. Generated configuration checks confirm octal PSRAM at 80 MHz with boot memory test, 240 MHz CPU, USB Serial/JTAG console, 16 MB flash, no LVGL dependency and no Secure Boot/Flash Encryption enablement. ESP-IDF itself emits existing Kconfig/dependency warnings; these are not firmware compilation errors.
+Software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build and Stage 1A compile-time logic tests pass. The firmware image with brightness-button control is 255,184 bytes, leaving 76% of the temporary 1 MB app partition free. Generated configuration checks confirm octal PSRAM at 80 MHz with boot memory test, 240 MHz CPU, USB Serial/JTAG console, 16 MB flash, no LVGL dependency and no Secure Boot/Flash Encryption enablement. ESP-IDF 6.1 may emit component-validation warnings for private `esp_wifi`/`wpa_supplicant` include directories (`wifi_apps/roaming_app` and `esp_supplicant`). These paths are declared by the framework's own component CMake files and are used internally by those components; they are not project include paths or firmware warnings. A warning-free configure requires an ESP-IDF release containing the corresponding framework CMake correction; changing application `PRIV_REQUIRES` cannot correct these internal declarations.
 
 Stage 2–3 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes after correcting Wi-Fi initialization ordering and skipping AP configuration in STA-only mode. The startup mode is selected before applying configurations for enabled interfaces, avoiding `ESP_ERR_WIFI_MODE` during SoftAP setup. With configured STA credentials, startup is STA-only and does not depend on connection success. The firmware binary is 964,048 bytes; the current 1 MiB app partition has 84,528 bytes (about 8%) free. Physical network and PWR-button acceptance remains pending after an approved flash.
 
 Stage 4 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes with the embedded web page and image clear/upload routes. The firmware binary is 968,272 bytes; 80,304 bytes (about 8%) remain in the temporary 1 MiB app partition. VS Code reports no diagnostics in the modified display and API sources. Image upload intentionally returns HTTP 501 after type/signature validation until Stage 5 adds decoding. AP/STA browser access and physical display clearing remain pending hardware acceptance.
 
-Initial Stage 5 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes with `esp_jpeg` integration, JPEG decode, bounded PSRAM upload/output buffers, and RGB565 fitting. The firmware binary is 973,648 bytes, leaving 74,928 bytes (about 7%) in the temporary 1 MiB app partition. PNG/BMP decoding and IMU rotation remain unimplemented; physical upload/render validation remains pending an approved flash.
+Stage 5 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes with JPEG, PNG, and BMP decoding, bounded PSRAM upload/output buffers, RGB565 fitting, and the large single-app bring-up partition. The firmware binary is 1,058,976 bytes; the `0x177000` app partition leaves 476,000 bytes (31%) free. PNG/BMP decode and physical upload/render validation remain pending an approved flash; IMU rotation remains unimplemented.
 
 Stage 1A physical acceptance after an approved flash: confirm successive GPIO18 presses give `10%, 0%, 100%, 90%` starting from 20%, continue through the full cycle, hold the button to verify no repeat, and reboot to confirm the default returns to 20%. Confirm the image is retained at 0% and reappears on the next press, and that BOOT/PWR are not used for dimming. Physical debounce and panel-brightness behavior remain pending board validation.
 
@@ -541,7 +543,7 @@ Then implement in small, independently testable stages:
 ### Stage 5 — Image display
 
 - Implemented: JPEG decoding and `contain`, `cover`, and `stretch` fitting.
-- Remaining: PNG and BMP decoding.
+- Implemented: PNG decoding with transparent pixels composited onto black, and uncompressed 24/32-bit BMP decoding. PNG and BMP dimensions are limited to 480 × 480; BMP palettes and compression modes are not supported.
 - Remaining: automatic image rotation using the onboard QMI8658. Verify the driver/API and shared I²C initialization (GPIO14/15), then use stable accelerometer orientation with hysteresis to avoid boundary flicker.
 - Validate malformed images and memory limits on the board after approved firmware installation.
 

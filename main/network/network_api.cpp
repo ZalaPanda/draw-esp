@@ -78,7 +78,7 @@ bool get_string(cJSON *root, const char *name, const char *&value)
 
 esp_err_t handle_root(httpd_req_t *request)
 {
-    static constexpr char page[] = R"HTML(<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32 Display</title><style>body{font:16px system-ui;max-width:680px;margin:2rem auto;padding:0 1rem;color:#18202a}section{padding:1rem;margin:1rem 0;border:1px solid #ccd3dc;border-radius:10px}label{display:block;margin:.6rem 0}input,select,button{font:inherit;padding:.5rem}pre{white-space:pre-wrap}</style><h1>ESP32 Image Display</h1><section><h2>Status</h2><pre id="status">Loading…</pre><button onclick="refresh()">Refresh</button></section><section><h2>Upload JPEG</h2><input id="image" type="file" accept="image/jpeg"><img id="preview" style="display:none;max-width:100%;margin-top:1rem"><label>Fit <select id="fit"><option>contain</option><option>cover</option><option>stretch</option></select></label><button onclick="upload()">Upload</button> <button onclick="clearDisplay()">Clear display</button></section><section><h2>Wi-Fi</h2><form id="wifi"><label>SSID <input name="ssid" required maxlength="32"></label><label>Password <input name="password" type="password" maxlength="64"></label><button>Save and connect</button></form><p id="message"></p></section><script>const msg=x=>document.getElementById('message').textContent=x;async function refresh(){try{let [d,n]=await Promise.all(['/api/device','/api/network'].map(x=>fetch(x).then(r=>r.json())));document.getElementById('status').textContent=JSON.stringify({device:d,network:n},null,2)}catch(e){msg(e.message)}}document.getElementById('image').onchange=e=>{let f=e.target.files[0],p=document.getElementById('preview');if(f){p.src=URL.createObjectURL(f);p.style.display='block'}};async function upload(){let f=document.getElementById('image').files[0];if(!f)return msg('Choose an image first');let r=await fetch('/api/image?fit='+document.getElementById('fit').value,{method:'POST',headers:{'Content-Type':f.type},body:f});msg(await r.text())}async function clearDisplay(){let r=await fetch('/api/image',{method:'DELETE'});msg(await r.text())}document.getElementById('wifi').onsubmit=async e=>{e.preventDefault();let o=Object.fromEntries(new FormData(e.target));let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});msg(await r.text());refresh()};refresh();setInterval(refresh,10000)</script></html>)HTML";
+    static constexpr char page[] = R"HTML(<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32 Display</title><style>body{font:16px system-ui;max-width:680px;margin:2rem auto;padding:0 1rem;color:#18202a}section{padding:1rem;margin:1rem 0;border:1px solid #ccd3dc;border-radius:10px}label{display:block;margin:.6rem 0}input,select,button{font:inherit;padding:.5rem}pre{white-space:pre-wrap}</style><h1>ESP32 Image Display</h1><section><h2>Status</h2><pre id="status">Loading…</pre><button onclick="refresh()">Refresh</button></section><section><h2>Upload image</h2><input id="image" type="file" accept="image/jpeg,image/png,image/bmp"><img id="preview" style="display:none;max-width:100%;margin-top:1rem"><label>Fit <select id="fit"><option>contain</option><option>cover</option><option>stretch</option></select></label><button onclick="upload()">Upload</button> <button onclick="clearDisplay()">Clear display</button></section><section><h2>Wi-Fi</h2><form id="wifi"><label>SSID <input name="ssid" required maxlength="32"></label><label>Password <input name="password" type="password" maxlength="64"></label><button>Save and connect</button></form><p id="message"></p></section><script>const msg=x=>document.getElementById('message').textContent=x;async function refresh(){try{let [d,n]=await Promise.all(['/api/device','/api/network'].map(x=>fetch(x).then(r=>r.json())));document.getElementById('status').textContent=JSON.stringify({device:d,network:n},null,2)}catch(e){msg(e.message)}}document.getElementById('image').onchange=e=>{let f=e.target.files[0],p=document.getElementById('preview');if(f){p.src=URL.createObjectURL(f);p.style.display='block'}};async function upload(){let f=document.getElementById('image').files[0];if(!f)return msg('Choose an image first');let r=await fetch('/api/image?fit='+document.getElementById('fit').value,{method:'POST',headers:{'Content-Type':f.type},body:f});msg(await r.text())}async function clearDisplay(){let r=await fetch('/api/image',{method:'DELETE'});msg(await r.text())}document.getElementById('wifi').onsubmit=async e=>{e.preventDefault();let o=Object.fromEntries(new FormData(e.target));let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});msg(await r.text());refresh()};refresh();setInterval(refresh,10000)</script></html>)HTML";
     httpd_resp_set_type(request, "text/html; charset=utf-8");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
@@ -103,11 +103,11 @@ esp_err_t handle_upload_image(httpd_req_t *request)
     if (httpd_req_get_hdr_value_str(request, "Content-Type", content_type, sizeof(content_type)) != ESP_OK) {
         return send_error(request, "415 Unsupported Media Type", "Content-Type is required");
     }
-    if (std::strcmp(content_type, "image/jpeg") != 0) {
-        if (std::strcmp(content_type, "image/png") == 0 || std::strcmp(content_type, "image/bmp") == 0)
-            return send_error(request, "501 Not Implemented", "PNG and BMP decoding are not available yet; send image/jpeg");
-        return send_error(request, "415 Unsupported Media Type", "Supported type at this stage: image/jpeg");
-    }
+    image::Format format;
+    if (std::strcmp(content_type, "image/jpeg") == 0) format = image::Format::jpeg;
+    else if (std::strcmp(content_type, "image/png") == 0) format = image::Format::png;
+    else if (std::strcmp(content_type, "image/bmp") == 0) format = image::Format::bmp;
+    else return send_error(request, "415 Unsupported Media Type", "Supported types: image/jpeg, image/png, image/bmp");
 
     auto *upload = static_cast<uint8_t *>(heap_caps_malloc(request->content_len,
                                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -122,9 +122,15 @@ esp_err_t handle_upload_image(httpd_req_t *request)
         }
         received += static_cast<size_t>(count);
     }
-    if (received < 3 || upload[0] != 0xFF || upload[1] != 0xD8 || upload[2] != 0xFF) {
+    const bool signature_matches = format == image::Format::jpeg
+        ? received >= 3 && upload[0] == 0xFF && upload[1] == 0xD8 && upload[2] == 0xFF
+        : format == image::Format::png
+            ? received >= 8 && upload[0] == 0x89 && upload[1] == 'P' && upload[2] == 'N' && upload[3] == 'G' &&
+              upload[4] == 0x0D && upload[5] == 0x0A && upload[6] == 0x1A && upload[7] == 0x0A
+            : received >= 2 && upload[0] == 'B' && upload[1] == 'M';
+    if (!signature_matches) {
         heap_caps_free(upload);
-        return send_error(request, "400 Bad Request", "JPEG signature does not match Content-Type");
+        return send_error(request, "400 Bad Request", "Image signature does not match Content-Type");
     }
 
     display::FitMode fit = display::FitMode::contain;
@@ -140,9 +146,19 @@ esp_err_t handle_upload_image(httpd_req_t *request)
         }
     }
     image::DecodedImage decoded;
-    const esp_err_t decode_error = image::decode_jpeg(upload, received, decoded);
+    esp_err_t decode_error = ESP_ERR_INVALID_ARG;
+    switch (format) {
+    case image::Format::jpeg: decode_error = image::decode_jpeg(upload, received, decoded); break;
+    case image::Format::png: decode_error = image::decode_png(upload, received, decoded); break;
+    case image::Format::bmp: decode_error = image::decode_bmp(upload, received, decoded); break;
+    }
     heap_caps_free(upload);
-    if (decode_error != ESP_OK) return send_error(request, "400 Bad Request", "JPEG is malformed or exceeds supported dimensions");
+    if (decode_error != ESP_OK) {
+        const char *message = decode_error == ESP_ERR_NO_MEM ? "Not enough memory to decode image" :
+            "Image is malformed, unsupported, or exceeds 480x480 pixels";
+        const char *status = decode_error == ESP_ERR_NO_MEM ? "503 Service Unavailable" : "400 Bad Request";
+        return send_error(request, status, message);
+    }
     const esp_err_t display_error = display::show_rgb565(decoded.pixels, decoded.width, decoded.height, fit);
     const int width = decoded.width;
     const int height = decoded.height;
@@ -153,7 +169,8 @@ esp_err_t handle_upload_image(httpd_req_t *request)
     cJSON_AddBoolToObject(root, "success", true);
     cJSON_AddNumberToObject(root, "width", width);
     cJSON_AddNumberToObject(root, "height", height);
-    cJSON_AddStringToObject(root, "format", "jpeg");
+    cJSON_AddStringToObject(root, "format", format == image::Format::jpeg ? "jpeg" :
+                                             format == image::Format::png ? "png" : "bmp");
     cJSON_AddStringToObject(root, "fit", fit == display::FitMode::cover ? "cover" :
                                       fit == display::FitMode::stretch ? "stretch" : "contain");
     return send_json(request, root);
