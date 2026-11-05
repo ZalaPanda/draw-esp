@@ -1,6 +1,7 @@
 #include "display_driver.h"
 #include "system/board_config.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include "esp_check.h"
@@ -192,6 +193,47 @@ esp_err_t show_test_pattern()
     }
 
     // The CO5300 accepts RGB565 MSB first; keep the PSRAM framebuffer in native byte order.
+    esp_err_t error = flush_framebuffer();
+    if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+    xSemaphoreGive(display_mutex);
+    return error;
+}
+
+esp_err_t show_rgb565(const uint16_t *pixels, int width, int height, FitMode fit)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    ESP_RETURN_ON_FALSE(pixels != nullptr && width > 0 && height > 0, ESP_ERR_INVALID_ARG, kTag,
+                        "Invalid source image");
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    std::memset(framebuffer, 0, kFramePixels * sizeof(uint16_t));
+
+    if (fit == FitMode::stretch) {
+        for (int y = 0; y < board::kDisplayHeight; ++y) {
+            const int sy = static_cast<int>((static_cast<int64_t>(y) * height) / board::kDisplayHeight);
+            for (int x = 0; x < board::kDisplayWidth; ++x) {
+                const int sx = static_cast<int>((static_cast<int64_t>(x) * width) / board::kDisplayWidth);
+                framebuffer[y * board::kDisplayWidth + x] = pixels[sy * width + sx];
+            }
+        }
+    } else {
+        const double scale = fit == FitMode::contain
+            ? std::min(static_cast<double>(board::kDisplayWidth) / width,
+                       static_cast<double>(board::kDisplayHeight) / height)
+            : std::max(static_cast<double>(board::kDisplayWidth) / width,
+                       static_cast<double>(board::kDisplayHeight) / height);
+        const int scaled_width = std::max(1, static_cast<int>(width * scale));
+        const int scaled_height = std::max(1, static_cast<int>(height * scale));
+        const int offset_x = (board::kDisplayWidth - scaled_width) / 2;
+        const int offset_y = (board::kDisplayHeight - scaled_height) / 2;
+        for (int y = 0; y < board::kDisplayHeight; ++y) {
+            const int sy = static_cast<int>((static_cast<int64_t>(y - offset_y) * height) / scaled_height);
+            if (sy < 0 || sy >= height) continue;
+            for (int x = 0; x < board::kDisplayWidth; ++x) {
+                const int sx = static_cast<int>((static_cast<int64_t>(x - offset_x) * width) / scaled_width);
+                if (sx >= 0 && sx < width) framebuffer[y * board::kDisplayWidth + x] = pixels[sy * width + sx];
+            }
+        }
+    }
     esp_err_t error = flush_framebuffer();
     if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
     xSemaphoreGive(display_mutex);

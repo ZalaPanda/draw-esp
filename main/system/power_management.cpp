@@ -64,6 +64,11 @@ void power_key_task(void *)
 }
 
 namespace power_management {
+i2c_master_bus_handle_t i2c_bus()
+{
+    return bus;
+}
+
 esp_err_t initialize()
 {
     ESP_RETURN_ON_FALSE(bus == nullptr, ESP_ERR_INVALID_STATE, kTag, "PMIC already initialized");

@@ -2,11 +2,12 @@ idf_component_register(
     SRCS "app_main.cpp"
          "system/power_management.cpp"
          "display/display_driver.cpp"
+         "image/jpeg_decoder.cpp"
          "input/brightness_button.cpp"
          "network/network_manager.cpp"
          "network/network_api.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_spi esp_lcd esp_psram
                   esp_event esp_netif esp_wifi nvs_flash esp_timer esp_http_server espressif__cjson
-                  espressif__esp_lcd_co5300 espressif__mdns
+                  espressif__esp_lcd_co5300 espressif__mdns espressif__esp_jpeg
 )

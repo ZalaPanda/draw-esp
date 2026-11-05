@@ -393,7 +393,7 @@ Work incrementally.
 
 ### Stage 1–4 implementation
 
-The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), and the Stage 4 web/status/clear interface. Image decoding and touch are not implemented. The image upload route validates bounded binary requests and image signatures, then reports that decoding is pending Stage 5.
+The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), the Stage 4 web/status/clear interface, and the initial JPEG decode/render slice of Stage 5. Touch, PNG/BMP decoding, and IMU-based orientation are not implemented yet.
 
 - `main/system/board_config.h` isolates verified board pins and memory/display sizes.
 - `main/system/power_management.cpp` uses native ESP-IDF I2C to verify the AXP2101 and enable voltage ADCs with read-modify-write and readback. Existing regulator voltages/enables, charger/temperature-sensor settings, interrupts and PWR-key behavior are deliberately preserved. The official display example likewise does not reprogram the display supply. This is not a battery-charging policy or power-control implementation.
@@ -439,8 +439,14 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 
 - `GET /` serves a small embedded HTML page with device/network status, image preview and fit selection, image upload/clear controls, and a station Wi-Fi setup form. It refreshes network status periodically and is served directly from firmware; no filesystem partition or frontend framework is required.
 - `DELETE /api/image` clears the RGB565 framebuffer and transfers the black frame to the display. Display writes and brightness commands share a mutex so HTTP requests cannot overlap the button task's panel operations.
-- `POST /api/image?fit=contain` accepts binary JPEG, PNG, or BMP bodies up to 1 MiB, checks Content-Type and the corresponding file signature, and drains the request without retaining a second full upload copy. It currently returns HTTP 501 after validation because decoding/fitting are Stage 5 work; no image is changed. The UI displays that response. Dimension validation and successful upload response become available with the decoder pipeline.
-- The HTTP service now registers the image upload and clear routes in addition to the Stage 3 routes. The existing HTTP/no-authentication security limitation remains: configure credentials only on a trusted local network.
+- The HTTP service registers the image upload and clear routes in addition to the Stage 3 routes. The existing HTTP/no-authentication security limitation remains: configure credentials only on a trusted local network.
+
+### Stage 5 implementation: JPEG decode and display fitting
+
+- `main/image/jpeg_decoder.cpp` uses Espressif's `esp_jpeg` component. It inspects JPEG dimensions before allocating decoded output and selects the largest decoder scale that keeps the result at or below 480 × 480. The compressed request and decoded RGB565 pixels use PSRAM; decoded memory is capped at one display frame.
+- `display::show_rgb565()` serializes against brightness and clear operations, applies `contain`, `cover`, or `stretch` using nearest-neighbor sampling into the existing framebuffer, flushes the frame, then enables the panel.
+- `POST /api/image` now decodes JPEG and returns width, height, format, and fit on success. PNG/BMP currently return HTTP 501. Progressive JPEG support follows the limits of the bundled decoder and may be rejected as malformed. Uploads remain transient and are not saved to flash.
+- Still pending in Stage 5: PNG and BMP decoders, QMI8658 initialization and stable-orientation rotation. The QMI8658 component is declared as a dependency, but no sensor calls are made until its API and board initialization are verified.
 
 The build includes compile-time assertions for the complete 11-step brightness cycle. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
 
@@ -480,6 +486,8 @@ Software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build and Stage 1A co
 Stage 2–3 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes after correcting Wi-Fi initialization ordering and skipping AP configuration in STA-only mode. The startup mode is selected before applying configurations for enabled interfaces, avoiding `ESP_ERR_WIFI_MODE` during SoftAP setup. With configured STA credentials, startup is STA-only and does not depend on connection success. The firmware binary is 964,048 bytes; the current 1 MiB app partition has 84,528 bytes (about 8%) free. Physical network and PWR-button acceptance remains pending after an approved flash.
 
 Stage 4 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes with the embedded web page and image clear/upload routes. The firmware binary is 968,272 bytes; 80,304 bytes (about 8%) remain in the temporary 1 MiB app partition. VS Code reports no diagnostics in the modified display and API sources. Image upload intentionally returns HTTP 501 after type/signature validation until Stage 5 adds decoding. AP/STA browser access and physical display clearing remain pending hardware acceptance.
+
+Initial Stage 5 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes with `esp_jpeg` integration, JPEG decode, bounded PSRAM upload/output buffers, and RGB565 fitting. The firmware binary is 973,648 bytes, leaving 74,928 bytes (about 7%) in the temporary 1 MiB app partition. PNG/BMP decoding and IMU rotation remain unimplemented; physical upload/render validation remains pending an approved flash.
 
 Stage 1A physical acceptance after an approved flash: confirm successive GPIO18 presses give `10%, 0%, 100%, 90%` starting from 20%, continue through the full cycle, hold the button to verify no repeat, and reboot to confirm the default returns to 20%. Confirm the image is retained at 0% and reappears on the next press, and that BOOT/PWR are not used for dimming. Physical debounce and panel-brightness behavior remain pending board validation.
 
@@ -532,11 +540,10 @@ Then implement in small, independently testable stages:
 
 ### Stage 5 — Image display
 
-- Implement JPEG decoding first and connect valid uploads to the framebuffer.
-- Implement image fitting modes.
-- Add PNG and BMP.
-- Add automatic image rotation based on device orientation using the onboard QMI8658 IMU. Use accelerometer readings to determine the stable orientation and rotate image content by 90° when needed; use hysteresis or a stability threshold to prevent flicker near orientation boundaries. The IMU is on the shared I²C bus (GPIO14/15), and its driver/initialization must be verified before implementation.
-- Test malformed images and memory limits.
+- Implemented: JPEG decoding and `contain`, `cover`, and `stretch` fitting.
+- Remaining: PNG and BMP decoding.
+- Remaining: automatic image rotation using the onboard QMI8658. Verify the driver/API and shared I²C initialization (GPIO14/15), then use stable accelerometer orientation with hysteresis to avoid boundary flicker.
+- Validate malformed images and memory limits on the board after approved firmware installation.
 
 ### Stage 6 — Integration and documentation
 
