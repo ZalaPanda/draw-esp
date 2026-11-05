@@ -17,14 +17,19 @@
 namespace {
 constexpr char kTag[] = "display";
 constexpr int kStripeRows = 16;
+constexpr int kIndicatorWidth = 10;
+constexpr int kImageLeft = kIndicatorWidth;
+constexpr int kImageWidth = board::kDisplayWidth - kImageLeft;
 constexpr int kUploadBrightnessPercent = 100;
 constexpr int kIdleBrightnessPercent = 20;
 constexpr uint64_t kUploadBrightnessDurationUs = 30ULL * 1000 * 1000;
 constexpr size_t kFramePixels = board::kDisplayWidth * board::kDisplayHeight;
 constexpr size_t kStripePixels = board::kDisplayWidth * kStripeRows;
+constexpr size_t kIndicatorPixels = kIndicatorWidth * board::kDisplayHeight;
 static_assert(kFramePixels * sizeof(uint16_t) == 460800);
 static_assert(kStripePixels * sizeof(uint16_t) == 15360);
 static_assert(board::kDisplayHeight % kStripeRows == 0);
+static_assert(kIndicatorPixels * sizeof(uint16_t) <= kStripePixels * sizeof(uint16_t));
 
 // Board-specific CO5300 register values and delays verified against Waveshare's BSP.
 constexpr uint8_t kPage20[] = {0x20};
@@ -137,25 +142,25 @@ void render_source()
     if (source_fit == display::FitMode::stretch) {
         for (int y = 0; y < board::kDisplayHeight; ++y) {
             const int sy = static_cast<int>((static_cast<int64_t>(y) * height) / board::kDisplayHeight);
-            for (int x = 0; x < board::kDisplayWidth; ++x) {
-                const int sx = static_cast<int>((static_cast<int64_t>(x) * width) / board::kDisplayWidth);
+            for (int x = kImageLeft; x < board::kDisplayWidth; ++x) {
+                const int sx = static_cast<int>((static_cast<int64_t>(x - kImageLeft) * width) / kImageWidth);
                 framebuffer[y * board::kDisplayWidth + x] = pixel_at(sx, sy);
             }
         }
     } else {
         const double scale = source_fit == display::FitMode::contain
-            ? std::min(static_cast<double>(board::kDisplayWidth) / width,
+            ? std::min(static_cast<double>(kImageWidth) / width,
                        static_cast<double>(board::kDisplayHeight) / height)
-            : std::max(static_cast<double>(board::kDisplayWidth) / width,
+            : std::max(static_cast<double>(kImageWidth) / width,
                        static_cast<double>(board::kDisplayHeight) / height);
         const int scaled_width = std::max(1, static_cast<int>(width * scale));
         const int scaled_height = std::max(1, static_cast<int>(height * scale));
-        const int offset_x = (board::kDisplayWidth - scaled_width) / 2;
+        const int offset_x = kImageLeft + (kImageWidth - scaled_width) / 2;
         const int offset_y = (board::kDisplayHeight - scaled_height) / 2;
         for (int y = 0; y < board::kDisplayHeight; ++y) {
             const int sy = static_cast<int>((static_cast<int64_t>(y - offset_y) * height) / scaled_height);
             if (sy < 0 || sy >= height) continue;
-            for (int x = 0; x < board::kDisplayWidth; ++x) {
+            for (int x = kImageLeft; x < board::kDisplayWidth; ++x) {
                 const int sx = static_cast<int>((static_cast<int64_t>(x - offset_x) * width) / scaled_width);
                 if (sx >= 0 && sx < width) framebuffer[y * board::kDisplayWidth + x] = pixel_at(sx, sy);
             }
@@ -291,7 +296,11 @@ esp_err_t show_test_pattern()
     constexpr uint16_t colors[] = {0xFFFF, 0xFFE0, 0x07FF, 0x07E0, 0xF81F, 0xF800, 0x001F, 0x0000};
     for (int y = 0; y < board::kDisplayHeight; ++y) {
         for (int x = 0; x < board::kDisplayWidth; ++x) {
-            uint16_t color = colors[x / (board::kDisplayWidth / 8)];
+            if (x < kImageLeft) {
+                framebuffer[y * board::kDisplayWidth + x] = 0;
+                continue;
+            }
+            uint16_t color = colors[(x - kImageLeft) * 8 / kImageWidth];
             if (y >= board::kDisplayHeight / 2) {
                 color = gray_rgb565(x * 255 / (board::kDisplayWidth - 1));
             }
@@ -306,6 +315,42 @@ esp_err_t show_test_pattern()
     // The CO5300 accepts RGB565 MSB first; keep the PSRAM framebuffer in native byte order.
     esp_err_t error = flush_framebuffer();
     if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+    xSemaphoreGive(display_mutex);
+    return error;
+}
+
+esp_err_t update_noise_indicator(unsigned level_percent, bool over_threshold)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    level_percent = std::min(level_percent, 100U);
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+
+    constexpr uint16_t kBackground = 0x2104;
+    constexpr uint16_t kBelowThreshold = 0x07E0;
+    constexpr uint16_t kAboveThreshold = 0xF800;
+    constexpr uint16_t kThresholdMarker = 0xFFE0;
+    const int fill_height = static_cast<int>((static_cast<uint64_t>(level_percent) * board::kDisplayHeight) / 100);
+    const int threshold_y = board::kDisplayHeight - (board::kDisplayHeight * 40 / 100);
+    for (int y = 0; y < board::kDisplayHeight; ++y) {
+        uint16_t color = kBackground;
+        if (y >= board::kDisplayHeight - fill_height) {
+            color = over_threshold ? kAboveThreshold : kBelowThreshold;
+        }
+        if (y == threshold_y || y == threshold_y + 1) color = kThresholdMarker;
+        const size_t pixel_index = static_cast<size_t>(y) * kIndicatorWidth;
+        for (int x = 0; x < kIndicatorWidth; ++x) {
+            const size_t byte_index = (pixel_index + x) * 2;
+            transfer_buffer[byte_index] = static_cast<uint8_t>(color >> 8);
+            transfer_buffer[byte_index + 1] = static_cast<uint8_t>(color);
+        }
+    }
+
+    const esp_err_t error = esp_lcd_panel_draw_bitmap(panel, 0, 0, kIndicatorWidth,
+                                                      board::kDisplayHeight, transfer_buffer);
+    if (error == ESP_OK && xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        xSemaphoreGive(display_mutex);
+        return ESP_ERR_TIMEOUT;
+    }
     xSemaphoreGive(display_mutex);
     return error;
 }

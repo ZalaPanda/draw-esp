@@ -61,6 +61,7 @@ The product schematic and board-specific BSP/example sources establish:
 | PMIC | AXP2101 at 7-bit address `0x34`, chip ID `0x4A` in register `0x03` |
 | PMIC measurements | Register `0x30`, bits 0/2/3 enable battery/VBUS/system voltage ADCs |
 | PSRAM | 8 MB octal, 80 MHz; initialized and memory-tested by ESP-IDF before `app_main` |
+| Microphone capture | Dual onboard microphones through ES7210 ADC; I2C address `0x40`, I2S MCLK GPIO42, BCLK GPIO9, LRCK GPIO45, data GPIO10 |
 | Touch wiring (not initialized in Stage 1) | I2C as above, reset GPIO40, interrupt GPIO11 |
 | USB console | Native USB Serial/JTAG, USB D− GPIO19 and D+ GPIO20 |
 | User button | KEY3, GPIO18, external 10 kOhm pull-up to VCC3V3, active-low (pressed connects to GND) |
@@ -76,6 +77,7 @@ Implementation sources inspected:
 - [Official PMIC example](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/examples/esp-idf/01_AXP2101/main/port_axp2101.cpp) and its [register definitions](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/examples/esp-idf/01_AXP2101/components/XPowersLib/src/REG/AXP2101Constants.h)
 - [AXP2101 software datasheet](https://files.waveshare.com/wiki/common/X-power-AXP2101_SWcharge_V1.0.pdf), including the short-press enable and write-one-to-clear IRQ status registers
 - [Waveshare GPIO pin assignments](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16#gpio-pin-assignments), including GPIO18/KEY3 wiring and pressed polarity
+- [Waveshare audio pin assignments](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16#audio-pins), including ES7210 and microphone I2S wiring
 
 The schematic labels an AXP IRQ net but does not establish a normal ESP32 GPIO interrupt connection; the official ESP-IDF PMIC example defaults its interrupt pin to `-1`. PWR-button timing, short-press reporting and safe behavior remain Stage 2 prerequisites. Stage 1 does not register PMIC interrupts or change power-button behavior.
 
@@ -146,6 +148,7 @@ Responsibilities:
 - Manage framebuffer memory.
 - Support RGB565 as the internal rendering format.
 - Display images at 480×480.
+- Reserve a 10-pixel strip on the left for the live noise-level indicator; fit images in the remaining 470×480 area.
 - Clear the display.
 - Handle image updates without unnecessary flickering.
 
@@ -395,7 +398,7 @@ Work incrementally.
 
 ### Stage 1–4 implementation
 
-The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), the Stage 4 web/status/clear interface, and JPEG/PNG/BMP decode, render, and QMI8658-based orientation support (Stage 5). Touch is not implemented.
+The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), the Stage 4 web/status/clear interface, JPEG/PNG/BMP decode and render with QMI8658 orientation (Stage 5), persistent image storage and timed brightness (Stage 6), and the Stage 7 microphone noise-level indicator. Touch is not implemented.
 
 - `main/system/board_config.h` isolates verified board pins and memory/display sizes.
 - `main/system/power_management.cpp` uses native ESP-IDF I2C to verify the AXP2101 and enable voltage ADCs with read-modify-write and readback. Existing regulator voltages/enables, charger/temperature-sensor settings, interrupts and PWR-key behavior are deliberately preserved. The official display example likewise does not reprogram the display supply. This is not a battery-charging policy or power-control implementation.
@@ -446,7 +449,7 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 ### Stage 5 implementation: JPEG decode and display fitting
 
 - `main/image/jpeg_decoder.cpp` uses Espressif's `esp_jpeg` component. It inspects JPEG dimensions before allocating decoded output and selects the largest decoder scale that keeps the result at or below 480 × 480. The compressed request and decoded RGB565 pixels use PSRAM; decoded memory is capped at one display frame.
-- `display::show_rgb565()` serializes against brightness and clear operations, applies `contain`, `cover`, or `stretch` using nearest-neighbor sampling into the existing framebuffer, flushes the frame, then enables the panel.
+- `display::show_rgb565()` serializes against brightness and clear operations, applies `contain`, `cover`, or `stretch` using nearest-neighbor sampling into the 470×480 image area, flushes the frame, then enables the panel. The leftmost 10 pixels are reserved for the Stage 7 indicator.
 - The display retains a PSRAM copy of the latest decoded image so orientation changes can redraw it without another upload. `clear()` releases that copy.
 - `POST /api/image` decodes JPEG, PNG, and BMP and returns width, height, format, and fit on success. PNG and BMP inputs are limited to 480 × 480 pixels to bound decoder memory. PNG transparency is composited onto black. BMP support is limited to uncompressed 24-bit and 32-bit files; palette, bitfield-compressed, and other encodings are rejected. Progressive JPEG support follows the limits of the bundled decoder and may be rejected as malformed. Stage 6 stores the successfully decoded upload's original compressed bytes in flash for restart recovery.
 - `main/input/orientation.cpp` initializes the QMI8658 at address `0x6B` on the PMIC module's existing 400 kHz GPIO14/15 I²C bus. It samples accelerometer data every 100 ms and accepts a new orientation after eight consecutive samples with at least 0.70 g on a dominant in-plane axis. Face-up/down and diagonal positions retain the last orientation, providing hysteresis against boundary flicker. The accelerometer runs at 125 Hz in ±4 g range; the gyroscope is left disabled. The managed driver 2.0.2 header declares `qmi8658_read_accel_mps2()`, but that version does not define it, so the firmware uses the implemented `qmi8658_read_accel()` with m/s² units enabled.
@@ -557,6 +560,13 @@ Then implement in small, independently testable stages:
 - Document build, flash and recovery procedures.
 - Document API endpoints and example curl commands.
 
+### Stage 7 — Noise-level indicator
+
+- Capture a short-window RMS sound level from the onboard ES7210 microphones.
+- Compare it to a slowly adapting ambient-noise baseline and show the relative level in a 10-pixel-wide vertical strip reserved at the left edge of the display.
+- Keep this stage informational only: do not change display brightness or trigger other device actions when the threshold is crossed.
+- Verify microphone capture, level response, threshold marker, image fitting, and display rotations on the board.
+
 ### Stage 6 implementation — persistent last image and timed brightness
 
 - `partitions.csv` provides two alternating raw flash slots, each large enough for the maximum 1 MiB compressed upload plus metadata. The slots are separate from NVS and the application partition.
@@ -567,6 +577,15 @@ Then implement in small, independently testable stages:
 - Flashing the firmware with the custom partition table is required for this feature. Do not use a full-chip erase; preserve the factory backup. The new storage behavior and recovery after interrupted writes require board testing.
 
 Stage 6 software validation (2026-11-05): ESP-IDF 6.1 build passes with the custom partition table and persistent-image/timed-brightness code. The firmware binary is 0x104430 bytes, leaving 0x17bbd0 bytes (59%) of the 2.5 MiB factory app partition free. No firmware was flashed during implementation. Board validation of reboot recovery, `/api/image` deletion persistence, interrupted writes, and the 30-second brightness cycle remains pending.
+
+### Stage 7 implementation — microphone noise-level indicator
+
+- `main/input/noise_level.cpp` captures both onboard microphones through the ES7210 ADC using ESP-IDF I2S and Espressif's `esp_codec_dev` **1.5.8** component. It reuses the shared I2C bus created by power management; capture clocks and data use GPIO42 (MCLK), GPIO9 (BCLK), GPIO45 (LRCK), and GPIO10 (data in).
+- Each 20 ms capture window produces an RMS level. A slowly adapting room-noise baseline is used as the relative reference. The bar maps 0–30 dB above that baseline to 0–100%; its yellow horizontal marker is at +12 dB. The baseline follows ordinary level changes slowly; a level over 3× baseline must persist for 2 seconds before it starts redefining the baseline. This is a relative indicator, not calibrated dB SPL.
+- `main/display/display_driver.cpp` reserves the leftmost 10 pixels for a vertical level bar and fits images into the remaining 470×480 area. The marker is yellow, the bar is green below the threshold, and red at or above the threshold. The audio task sends only this narrow strip to the panel, reuses the existing DMA staging buffer, and serializes updates through the display mutex.
+- This stage is visual only: crossing the threshold does not change panel brightness, trigger another action, save audio, or transmit audio. Microphone capture and the adaptive baseline require physical validation on the board; the host build cannot confirm codec wiring, gain, sample quality, or useful threshold sensitivity.
+
+Stage 7 software validation (2026-11-05): ESP-IDF 6.1 ESP32-S3 build passes with ES7210 capture support and the 10-pixel indicator strip. The binary is 0x1111f0 bytes; 0x16ee10 bytes (57%) remain in the 2.5 MiB application partition. Physical microphone capture and indicator behavior remain pending board validation. No firmware was flashed.
 
 ## 13. Critical development rules
 

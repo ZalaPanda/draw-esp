@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include "driver/gpio.h"
+#include "driver/i2s_common.h"
 #include "driver/spi_master.h"
 
 namespace board {
@@ -15,6 +16,11 @@ constexpr gpio_num_t kDisplayData2 = GPIO_NUM_6;
 constexpr gpio_num_t kDisplayData3 = GPIO_NUM_7;
 constexpr gpio_num_t kDisplayReset = GPIO_NUM_39;
 constexpr gpio_num_t kUserButton = GPIO_NUM_18;
+constexpr gpio_num_t kAudioMclk = GPIO_NUM_42;
+constexpr gpio_num_t kAudioBclk = GPIO_NUM_9;
+constexpr gpio_num_t kAudioLrck = GPIO_NUM_45;
+constexpr gpio_num_t kMicrophoneData = GPIO_NUM_10;
+constexpr int kAudioI2sPort = I2S_NUM_0;
 // PWR is connected to AXP2101 PWRON; its IRQ output is not routed to an ESP32 GPIO.
 constexpr spi_host_device_t kDisplayHost = SPI2_HOST;
 constexpr int kDisplayWidth = 480;

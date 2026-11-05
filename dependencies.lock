@@ -19,6 +19,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.5.3
+  espressif/esp_codec_dev:
+    component_hash: f4f3f142bac5768248a2a2b73552b136809769146b2fe0c42a175670a3938c5e
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.5.8
   espressif/esp_jpeg:
     component_hash: 47d19eac5f76fac06798c04f4d2579c7ab26fd33280ed10f43d8895175376bdf
     dependencies:
@@ -93,12 +103,13 @@ dependencies:
     version: 2.0.2
 direct_dependencies:
 - espressif/cjson
+- espressif/esp_codec_dev
 - espressif/esp_jpeg
 - espressif/esp_lcd_co5300
 - espressif/libpng
 - espressif/mdns
 - idf
 - waveshare/qmi8658
-manifest_hash: 7faeddbe42e46d5b7ef7367cc3c4d8d493cdf1f61886f7d3f9b2ff5c6af36b8c
+manifest_hash: 6ceaa0e24b97a44453505a3f76787f130cdd3a6e91d009113b963e7974df5af9
 target: esp32s3
 version: 3.0.0

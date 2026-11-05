@@ -13,4 +13,5 @@ esp_err_t restore_rgb565(const uint16_t *pixels, int width, int height, FitMode 
 esp_err_t set_rotation(Rotation rotation);
 esp_err_t clear();
 esp_err_t decrease_brightness();
+esp_err_t update_noise_indicator(unsigned level_percent, bool over_threshold);
 }

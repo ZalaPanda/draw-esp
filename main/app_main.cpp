@@ -3,6 +3,7 @@
 #include "image/image_store.h"
 #include "input/brightness_button.h"
 #include "input/orientation.h"
+#include "input/noise_level.h"
 #include "network/network_api.h"
 #include "network/network_manager.h"
 #include "system/board_config.h"
@@ -91,4 +92,11 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(input::start_orientation_monitor());
     ESP_LOGI(kTag, "Stage 5 ready: QMI8658 stable-orientation image rotation enabled");
+
+    const esp_err_t noise_error = input::start_noise_level_monitor();
+    if (noise_error == ESP_OK) {
+        ESP_LOGI(kTag, "Stage 7 ready: microphone noise-level indicator active");
+    } else {
+        ESP_LOGE(kTag, "Noise-level indicator unavailable: %s", esp_err_to_name(noise_error));
+    }
 }
