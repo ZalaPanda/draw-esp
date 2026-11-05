@@ -391,9 +391,9 @@ Do not implement any of these in the initial version.
 
 Work incrementally.
 
-### Stage 1–3 implementation
+### Stage 1–4 implementation
 
-The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), and AP + STA networking (Stage 3). A small HTTP API for device/network status and Wi-Fi/AP setup is included to make Stage 3 configurable. Image upload, image decoding, a static web interface, and touch are not implemented.
+The project implements board initialization (Stage 1), user-button brightness control (Stage 1A), PWR-button AP control (Stage 2), AP + STA networking (Stage 3), and the Stage 4 web/status/clear interface. Image decoding and touch are not implemented. The image upload route validates bounded binary requests and image signatures, then reports that decoding is pending Stage 5.
 
 - `main/system/board_config.h` isolates verified board pins and memory/display sizes.
 - `main/system/power_management.cpp` uses native ESP-IDF I2C to verify the AXP2101 and enable voltage ADCs with read-modify-write and readback. Existing regulator voltages/enables, charger/temperature-sensor settings, interrupts and PWR-key behavior are deliberately preserved. The official display example likewise does not reprogram the display supply. This is not a battery-charging policy or power-control implementation.
@@ -432,8 +432,15 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 - Wi-Fi startup selects AP or AP+STA mode before applying interface-specific configurations. Runtime mode changes use the same ordering so ESP-IDF has the AP/STA interface enabled before `esp_wifi_set_config()` is called.
 - The default AP password is derived from the full factory Wi-Fi MAC and saved in NVS. It is printed in the USB serial boot log for initial setup. `APP_AP_PASSWORD` in project configuration can supply a custom initial password; `POST /api/ap/password` changes and persists it. The AP password is never included in API responses.
 - `APP_STA_SSID` and `APP_STA_PASSWORD` can seed initial station credentials through `menuconfig`; the firmware stores them in NVS on first boot. `POST /api/wifi` and `DELETE /api/wifi` set or remove credentials at runtime. STA reconnect attempts use a five-second retry timer, and a missing STA network does not stop AP operation.
-- mDNS advertises `esp32-display.local` and the HTTP service. The HTTP server is reachable through AP and STA. Implemented routes are `GET /`, `GET /api/device`, `GET /api/network`, `POST /api/wifi`, `DELETE /api/wifi`, and `POST /api/ap/password`. `/` currently returns plain-text setup help; a static web interface and the image API remain future work.
+- mDNS advertises `esp32-display.local` and the HTTP service. The HTTP server is reachable through AP and STA. Implemented routes include `GET /`, `GET /api/device`, `GET /api/network`, `POST /api/wifi`, `DELETE /api/wifi`, `POST /api/ap/password`, and `POST/DELETE /api/image`.
 - Credential and AP-password changes use the documented HTTP API over the local AP or LAN. Use a trusted network; the initial API is HTTP and does not provide TLS or user accounts. The setup password is available in the USB serial boot log.
+
+### Stage 4 implementation: HTTP interface
+
+- `GET /` serves a small embedded HTML page with device/network status, image preview and fit selection, image upload/clear controls, and a station Wi-Fi setup form. It refreshes network status periodically and is served directly from firmware; no filesystem partition or frontend framework is required.
+- `DELETE /api/image` clears the RGB565 framebuffer and transfers the black frame to the display. Display writes and brightness commands share a mutex so HTTP requests cannot overlap the button task's panel operations.
+- `POST /api/image?fit=contain` accepts binary JPEG, PNG, or BMP bodies up to 1 MiB, checks Content-Type and the corresponding file signature, and drains the request without retaining a second full upload copy. It currently returns HTTP 501 after validation because decoding/fitting are Stage 5 work; no image is changed. The UI displays that response. Dimension validation and successful upload response become available with the decoder pipeline.
+- The HTTP service now registers the image upload and clear routes in addition to the Stage 3 routes. The existing HTTP/no-authentication security limitation remains: configure credentials only on a trusted local network.
 
 The build includes compile-time assertions for the complete 11-step brightness cycle. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
 
@@ -471,6 +478,8 @@ A successful build verifies compilation and configuration, not physical panel op
 Software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build and Stage 1A compile-time logic tests pass. The firmware image with brightness-button control is 255,184 bytes, leaving 76% of the temporary 1 MB app partition free. Generated configuration checks confirm octal PSRAM at 80 MHz with boot memory test, 240 MHz CPU, USB Serial/JTAG console, 16 MB flash, no LVGL dependency and no Secure Boot/Flash Encryption enablement. ESP-IDF itself emits existing Kconfig/dependency warnings; these are not firmware compilation errors.
 
 Stage 2–3 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes after correcting Wi-Fi initialization ordering and skipping AP configuration in STA-only mode. The startup mode is selected before applying configurations for enabled interfaces, avoiding `ESP_ERR_WIFI_MODE` during SoftAP setup. With configured STA credentials, startup is STA-only and does not depend on connection success. The firmware binary is 964,048 bytes; the current 1 MiB app partition has 84,528 bytes (about 8%) free. Physical network and PWR-button acceptance remains pending after an approved flash.
+
+Stage 4 software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build passes with the embedded web page and image clear/upload routes. The firmware binary is 968,272 bytes; 80,304 bytes (about 8%) remain in the temporary 1 MiB app partition. VS Code reports no diagnostics in the modified display and API sources. Image upload intentionally returns HTTP 501 after type/signature validation until Stage 5 adds decoding. AP/STA browser access and physical display clearing remain pending hardware acceptance.
 
 Stage 1A physical acceptance after an approved flash: confirm successive GPIO18 presses give `10%, 0%, 100%, 90%` starting from 20%, continue through the full cycle, hold the button to verify no repeat, and reboot to confirm the default returns to 20%. Confirm the image is retained at 0% and reappears on the next press, and that BOOT/PWR are not used for dimming. Physical debounce and panel-brightness behavior remain pending board validation.
 
@@ -518,13 +527,12 @@ Then implement in small, independently testable stages:
 
 ### Stage 4 — HTTP server
 
-- Complete the remaining REST endpoints, including image upload and display clear.
-- Serve a minimal static page.
-- Test access through both AP and STA.
+- Implemented: serve a minimal embedded page, clear the display, and validate bounded image upload requests and their signatures. Image uploads return HTTP 501 until Stage 5 supplies decoding and rendering.
+- Hardware acceptance: test access through both AP and STA.
 
 ### Stage 5 — Image display
 
-- Implement JPEG decoding first.
+- Implement JPEG decoding first and connect valid uploads to the framebuffer.
 - Implement image fitting modes.
 - Add PNG and BMP.
 - Add automatic image rotation based on device orientation using the onboard QMI8658 IMU. Use accelerometer readings to determine the stable orientation and rotate image content by 90° when needed; use hysteresis or a stability threshold to prevent flicker near orientation boundaries. The IMU is on the shared I²C bus (GPIO14/15), and its driver/initialization must be verified before implementation.

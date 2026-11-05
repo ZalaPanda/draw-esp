@@ -57,4 +57,7 @@ Invoke-RestMethod -Uri "http://192.168.4.1/api/ap/password" -Method Post -Conten
 # set STA ssid and password
 $body = @{ ssid = "HomeWifi"; password = "your-router-password" } | ConvertTo-Json
 Invoke-RestMethod -Uri "http://192.168.4.1/api/wifi" -Method Post -ContentType "application/json" -Body $body
+
+$imagePath = "C:\Users\fuhuaaxh\Downloads\cute.bmp"
+curl.exe -i -X POST "http://192.168.0.211/api/image?fit=contain" -H "Content-Type: image/bmp" --data-binary "@$imagePath"
 ```

@@ -2,8 +2,10 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 
 #include "cJSON.h"
+#include "display/display_driver.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -12,6 +14,7 @@
 
 namespace {
 constexpr char kTag[] = "network-api";
+constexpr size_t kMaximumImageUpload = 1024 * 1024;
 httpd_handle_t server = nullptr;
 
 esp_err_t send_json(httpd_req_t *request, cJSON *root, const char *status = "200 OK")
@@ -73,10 +76,54 @@ bool get_string(cJSON *root, const char *name, const char *&value)
 
 esp_err_t handle_root(httpd_req_t *request)
 {
-    httpd_resp_set_type(request, "text/plain; charset=utf-8");
-    return httpd_resp_sendstr(request,
-        "ESP32 Network Image Display\n"
-        "API: GET /api/device, GET /api/network, POST/DELETE /api/wifi, POST /api/ap/password\n");
+    static constexpr char page[] = R"HTML(<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32 Display</title><style>body{font:16px system-ui;max-width:680px;margin:2rem auto;padding:0 1rem;color:#18202a}section{padding:1rem;margin:1rem 0;border:1px solid #ccd3dc;border-radius:10px}label{display:block;margin:.6rem 0}input,select,button{font:inherit;padding:.5rem}pre{white-space:pre-wrap}</style><h1>ESP32 Image Display</h1><section><h2>Status</h2><pre id="status">Loading…</pre><button onclick="refresh()">Refresh</button></section><section><h2>Upload image</h2><input id="image" type="file" accept="image/jpeg,image/png,image/bmp"><img id="preview" style="display:none;max-width:100%;margin-top:1rem"><label>Fit <select id="fit"><option>contain</option><option>cover</option><option>stretch</option></select></label><button onclick="upload()">Upload</button> <button onclick="clearDisplay()">Clear display</button></section><section><h2>Wi-Fi</h2><form id="wifi"><label>SSID <input name="ssid" required maxlength="32"></label><label>Password <input name="password" type="password" maxlength="64"></label><button>Save and connect</button></form><p id="message"></p></section><script>const msg=x=>document.getElementById('message').textContent=x;async function refresh(){try{let [d,n]=await Promise.all(['/api/device','/api/network'].map(x=>fetch(x).then(r=>r.json())));document.getElementById('status').textContent=JSON.stringify({device:d,network:n},null,2)}catch(e){msg(e.message)}}document.getElementById('image').onchange=e=>{let f=e.target.files[0],p=document.getElementById('preview');if(f){p.src=URL.createObjectURL(f);p.style.display='block'}};async function upload(){let f=document.getElementById('image').files[0];if(!f)return msg('Choose an image first');let r=await fetch('/api/image?fit='+document.getElementById('fit').value,{method:'POST',headers:{'Content-Type':f.type},body:f});msg(await r.text())}async function clearDisplay(){let r=await fetch('/api/image',{method:'DELETE'});msg(await r.text())}document.getElementById('wifi').onsubmit=async e=>{e.preventDefault();let o=Object.fromEntries(new FormData(e.target));let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});msg(await r.text());refresh()};refresh();setInterval(refresh,10000)</script></html>)HTML";
+    httpd_resp_set_type(request, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t handle_clear_image(httpd_req_t *request)
+{
+    const esp_err_t error = display::clear();
+    if (error != ESP_OK) return send_error(request, "500 Internal Server Error", esp_err_to_name(error));
+    cJSON *root = cJSON_CreateObject();
+    if (root == nullptr) return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON allocation failed");
+    cJSON_AddBoolToObject(root, "success", true);
+    return send_json(request, root);
+}
+
+esp_err_t handle_upload_image(httpd_req_t *request)
+{
+    if (request->content_len <= 0 || static_cast<size_t>(request->content_len) > kMaximumImageUpload) {
+        return send_error(request, "413 Payload Too Large", "Image must be between 1 byte and 1 MiB");
+    }
+    char content_type[64] = {};
+    if (httpd_req_get_hdr_value_str(request, "Content-Type", content_type, sizeof(content_type)) != ESP_OK) {
+        return send_error(request, "415 Unsupported Media Type", "Content-Type is required");
+    }
+    const char *format = nullptr;
+    if (std::strcmp(content_type, "image/jpeg") == 0) format = "jpeg";
+    else if (std::strcmp(content_type, "image/png") == 0) format = "png";
+    else if (std::strcmp(content_type, "image/bmp") == 0) format = "bmp";
+    else return send_error(request, "415 Unsupported Media Type", "Supported types: image/jpeg, image/png, image/bmp");
+
+    uint8_t signature[8] = {};
+    size_t received = 0;
+    bool signature_valid = false;
+    while (received < static_cast<size_t>(request->content_len)) {
+        uint8_t chunk[512];
+        const int count = httpd_req_recv(request, reinterpret_cast<char *>(chunk),
+            std::min(sizeof(chunk), static_cast<size_t>(request->content_len) - received));
+        if (count <= 0) return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Image upload was interrupted");
+        for (int i = 0; i < count && received + static_cast<size_t>(i) < sizeof(signature); ++i)
+            signature[received + static_cast<size_t>(i)] = chunk[i];
+        received += static_cast<size_t>(count);
+    }
+    if (std::strcmp(format, "jpeg") == 0) signature_valid = received >= 3 && signature[0] == 0xFF && signature[1] == 0xD8 && signature[2] == 0xFF;
+    if (std::strcmp(format, "png") == 0) signature_valid = received >= 8 && signature[0] == 0x89 && signature[1] == 'P' && signature[2] == 'N' && signature[3] == 'G' && signature[4] == 0x0D && signature[5] == 0x0A && signature[6] == 0x1A && signature[7] == 0x0A;
+    if (std::strcmp(format, "bmp") == 0) signature_valid = received >= 2 && signature[0] == 'B' && signature[1] == 'M';
+    if (!signature_valid) return send_error(request, "400 Bad Request", "Image signature does not match Content-Type");
+    return send_error(request, "501 Not Implemented", "Image decoding is scheduled for Stage 5; no image was changed");
 }
 
 esp_err_t handle_device(httpd_req_t *request)
@@ -205,11 +252,13 @@ esp_err_t start_http_api()
 {
     ESP_RETURN_ON_FALSE(server == nullptr, ESP_ERR_INVALID_STATE, kTag, "HTTP API already started");
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
     config.stack_size = 6144;
     config.lru_purge_enable = true;
     ESP_RETURN_ON_ERROR(httpd_start(&server, &config), kTag, "HTTP server startup failed");
     ESP_RETURN_ON_ERROR(register_handler(HTTP_GET, "/", handle_root), kTag, "Root handler registration failed");
+    ESP_RETURN_ON_ERROR(register_handler(HTTP_POST, "/api/image", handle_upload_image), kTag, "Image upload handler registration failed");
+    ESP_RETURN_ON_ERROR(register_handler(HTTP_DELETE, "/api/image", handle_clear_image), kTag, "Image clear handler registration failed");
     ESP_RETURN_ON_ERROR(register_handler(HTTP_GET, "/api/device", handle_device), kTag, "Device handler registration failed");
     ESP_RETURN_ON_ERROR(register_handler(HTTP_GET, "/api/network", handle_network), kTag, "Network handler registration failed");
     ESP_RETURN_ON_ERROR(register_handler(HTTP_POST, "/api/wifi", handle_set_wifi), kTag, "Wi-Fi handler registration failed");

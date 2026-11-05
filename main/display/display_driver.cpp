@@ -2,6 +2,7 @@
 #include "system/board_config.h"
 
 #include <cstdint>
+#include <cstring>
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_co5300.h"
@@ -52,6 +53,7 @@ esp_lcd_panel_handle_t panel = nullptr;
 uint16_t *framebuffer = nullptr;
 uint8_t *transfer_buffer = nullptr;
 SemaphoreHandle_t transfer_done = nullptr;
+SemaphoreHandle_t display_mutex = nullptr;
 bool initialized = false;
 int brightness_percent = 20;
 
@@ -85,6 +87,23 @@ constexpr uint16_t gray_rgb565(unsigned gray)
 {
     return static_cast<uint16_t>(((gray >> 3) << 11) | ((gray >> 2) << 5) | (gray >> 3));
 }
+
+esp_err_t flush_framebuffer()
+{
+    for (int y = 0; y < board::kDisplayHeight; y += kStripeRows) {
+        const uint16_t *source = framebuffer + y * board::kDisplayWidth;
+        for (size_t i = 0; i < kStripePixels; ++i) {
+            transfer_buffer[2 * i] = static_cast<uint8_t>(source[i] >> 8);
+            transfer_buffer[2 * i + 1] = static_cast<uint8_t>(source[i]);
+        }
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_draw_bitmap(panel, 0, y, board::kDisplayWidth,
+                                                     y + kStripeRows, transfer_buffer),
+                            kTag, "Framebuffer stripe at y=%d failed", y);
+        ESP_RETURN_ON_FALSE(xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) == pdTRUE,
+                            ESP_ERR_TIMEOUT, kTag, "DMA completion timed out at y=%d", y);
+    }
+    return ESP_OK;
+}
 static_assert(gray_rgb565(0) == 0x0000);
 static_assert(gray_rgb565(255) == 0xFFFF);
 }
@@ -101,6 +120,8 @@ esp_err_t initialize()
     ESP_RETURN_ON_FALSE(transfer_buffer != nullptr, ESP_ERR_NO_MEM, kTag, "Internal DMA buffer allocation failed");
     transfer_done = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(transfer_done != nullptr, ESP_ERR_NO_MEM, kTag, "Transfer semaphore creation failed");
+    display_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(display_mutex != nullptr, ESP_ERR_NO_MEM, kTag, "Display mutex creation failed");
 
     spi_bus_config_t bus_config = {};
     bus_config.sclk_io_num = board::kDisplayClock;
@@ -154,6 +175,7 @@ esp_err_t initialize()
 esp_err_t show_test_pattern()
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
     constexpr uint16_t colors[] = {0xFFFF, 0xFFE0, 0x07FF, 0x07E0, 0xF81F, 0xF800, 0x001F, 0x0000};
     for (int y = 0; y < board::kDisplayHeight; ++y) {
         for (int x = 0; x < board::kDisplayWidth; ++x) {
@@ -169,31 +191,32 @@ esp_err_t show_test_pattern()
         }
     }
 
-    for (int y = 0; y < board::kDisplayHeight; y += kStripeRows) {
-        const uint16_t *source = framebuffer + y * board::kDisplayWidth;
-        // The CO5300 accepts RGB565 MSB first; keep the PSRAM framebuffer in native byte order.
-        for (size_t i = 0; i < kStripePixels; ++i) {
-            transfer_buffer[2 * i] = static_cast<uint8_t>(source[i] >> 8);
-            transfer_buffer[2 * i + 1] = static_cast<uint8_t>(source[i]);
-        }
-        ESP_RETURN_ON_ERROR(esp_lcd_panel_draw_bitmap(panel, 0, y, board::kDisplayWidth,
-                                                     y + kStripeRows, transfer_buffer),
-                            kTag, "Test-pattern stripe at y=%d failed", y);
-        ESP_RETURN_ON_FALSE(xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) == pdTRUE,
-                            ESP_ERR_TIMEOUT, kTag, "DMA completion timed out at y=%d", y);
-    }
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), kTag, "Display enable failed");
-    return ESP_OK;
+    // The CO5300 accepts RGB565 MSB first; keep the PSRAM framebuffer in native byte order.
+    esp_err_t error = flush_framebuffer();
+    if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+    xSemaphoreGive(display_mutex);
+    return error;
+}
+
+esp_err_t clear()
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    std::memset(framebuffer, 0, kFramePixels * sizeof(uint16_t));
+    const esp_err_t error = flush_framebuffer();
+    xSemaphoreGive(display_mutex);
+    return error;
 }
 
 esp_err_t decrease_brightness()
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
     const int next = next_brightness(brightness_percent);
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, next),
-                        kTag, "Brightness change from %d%% to %d%% failed", brightness_percent, next);
-    brightness_percent = next;
+    const esp_err_t error = esp_lcd_panel_co5300_set_brightness(panel, next);
+    if (error == ESP_OK) brightness_percent = next;
     ESP_LOGI(kTag, "Brightness: %d%%", brightness_percent);
-    return ESP_OK;
+    xSemaphoreGive(display_mutex);
+    return error;
 }
 }
