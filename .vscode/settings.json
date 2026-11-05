@@ -5,7 +5,12 @@
     "cmake.automaticReconfigure": false,
     "cmake.autoSelectActiveFolder": false,
     "idf.currentSetup": "C:\\Util\\esp\\v6.1\\esp-idf",
+    "idf.buildPath": "${workspaceFolder}\\build",
+    "idf.sdkconfigDefaults": [
+        "sdkconfig.defaults"
+    ],
     "idf.port": "COM4",
+    "idf.monitorBaudRate": "115200",
     "idf.openOcdConfigs": [
         "board/esp32s3-builtin.cfg"
     ],

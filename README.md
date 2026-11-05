@@ -45,7 +45,36 @@ Primary sources:
 - [Waveshare first-party examples and schematic](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16)
 - [ESP-IDF 6.1 documentation](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/)
 
-The exact display GPIO mapping, QSPI panel initialization commands, touch GPIO/I2C mapping, PMU I2C/interrupt pins, PSRAM mode, and PWR-button event semantics have not yet been verified against the schematic and implementation sources. These remain prerequisites for hardware initialization and physical-input work; no pin assignments should be inferred from examples for other boards.
+### Stage 1 hardware verification (2026-11-05)
+
+The product schematic and board-specific BSP/example sources establish:
+
+| Function | Verified configuration |
+| --- | --- |
+| AMOLED | CO5300, 480 × 480, RGB565, SPI2 QSPI at 40 MHz |
+| QSPI signals | CS GPIO12, clock GPIO38, data0–3 GPIO4–7 |
+| Display reset | GPIO39 |
+| Display supply | Connector J4 uses VCC3V3, supplied by AXP2101 DCDC1; no separate display-power GPIO is required |
+| Shared I2C | SDA GPIO15, SCL GPIO14, 400 kHz |
+| PMIC | AXP2101 at 7-bit address `0x34`, chip ID `0x4A` in register `0x03` |
+| PMIC measurements | Register `0x30`, bits 0/2/3 enable battery/VBUS/system voltage ADCs |
+| PSRAM | 8 MB octal, 80 MHz; initialized and memory-tested by ESP-IDF before `app_main` |
+| Touch wiring (not initialized in Stage 1) | I2C as above, reset GPIO40, interrupt GPIO11 |
+| USB console | Native USB Serial/JTAG, USB D− GPIO19 and D+ GPIO20 |
+| User button | KEY3, GPIO18, external 10 kOhm pull-up to VCC3V3, active-low (pressed connects to GND) |
+
+Stage 1 uses the board-specific CO5300 register sequence from the Waveshare BSP, including its 600 ms sleep-out/display-on delays, 480 × 480 address window, `0x3A=0x55` RGB565 mode and `0x36=0xA0` orientation. These are panel-specific values, not the generic driver's default sequence.
+
+Implementation sources inspected:
+
+- [Waveshare schematic, page 1](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/schematic/ESP32-S3-Touch-AMOLED-2.16-Schematic.pdf)
+- [Board-specific BSP initialization](https://github.com/waveshareteam/Waveshare-ESP32-components/blob/23a6012d5e87d27399cf90fb851cab3689e29159/bsp/esp32_s3_touch_amoled_2_16/esp32_s3_touch_amoled_2_16.c)
+- [BSP pin definitions](https://github.com/waveshareteam/Waveshare-ESP32-components/blob/23a6012d5e87d27399cf90fb851cab3689e29159/bsp/esp32_s3_touch_amoled_2_16/include/bsp/esp32_s3_touch_amoled_2_16.h)
+- [Official PSRAM defaults](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/examples/esp-idf/02_lvgl_demo_v9/sdkconfig.defaults)
+- [Official PMIC example](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/examples/esp-idf/01_AXP2101/main/port_axp2101.cpp) and its [register definitions](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16/blob/225a62bff11b5d0a0b607873860d39485a9a9685/examples/esp-idf/01_AXP2101/components/XPowersLib/src/REG/AXP2101Constants.h)
+- [Waveshare GPIO pin assignments](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16#gpio-pin-assignments), including GPIO18/KEY3 wiring and pressed polarity
+
+The schematic labels an AXP IRQ net but does not establish a normal ESP32 GPIO interrupt connection; the official ESP-IDF PMIC example defaults its interrupt pin to `-1`. PWR-button timing, short-press reporting and safe behavior remain Stage 2 prerequisites. Stage 1 does not register PMIC interrupts or change power-button behavior.
 
 The board currently has factory firmware installed.
 
@@ -360,9 +389,70 @@ Do not implement any of these in the initial version.
 
 Work incrementally.
 
-### Workspace bootstrap status (2026-11-04)
+### Stage 1 implementation
 
-A minimal ESP-IDF project only emits a startup log and does not initialize hardware. The ESP-IDF 6.1 framework and tools are available after loading `C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1`. The scaffold builds successfully with the ESP32-S3 target using `idf.py build`. Its flash-size default and generated esptool arguments are set to the board's verified 16 MB; the generated default partition table is temporary and allocates a 1 MB factory app until an application-specific layout is designed. Generated `build/` and `sdkconfig` are ignored. The factory backup is present at `backups/factory-backup.bin` (16,777,216 bytes); it must remain untouched.
+The project implements board initialization (Stage 1) and user-button brightness control (Stage 1A). Networking, PWR-button input, HTTP, image decoding and touch are not initialized.
+
+- `main/system/board_config.h` isolates verified board pins and memory/display sizes.
+- `main/system/power_management.cpp` uses native ESP-IDF I2C to verify the AXP2101 and enable voltage ADCs with read-modify-write and readback. Existing regulator voltages/enables, charger/temperature-sensor settings, interrupts and PWR-key behavior are deliberately preserved. The official display example likewise does not reprogram the display supply. This is not a battery-charging policy or power-control implementation.
+- `app_main` requires initialized PSRAM with exactly 8,388,608 detected bytes. ESP-IDF's boot memory test is enabled and missing PSRAM is fatal rather than silently falling back to internal RAM.
+- `main/display/display_driver.cpp` uses the managed `espressif/esp_lcd_co5300` **2.2.0** component with the verified Waveshare panel sequence. The full BSP is not linked because it unconditionally depends on LVGL and unrelated audio/touch/USB components. `dependencies.lock` records the resolved driver and build-helper versions.
+- A 460,800-byte native-order RGB565 framebuffer is allocated in PSRAM. A single 15,360-byte internal DMA staging buffer sends 16-row stripes in panel-required big-endian pixel order. Each transfer waits for its completion callback with a bounded timeout before reusing the buffer. Buffers remain allocated for the application's lifetime; allocation, bus, panel and transfer failures are logged and fatal during bring-up.
+- The panel is blanked while uploading the pattern, then enabled at 20% brightness. The pattern contains white/yellow/cyan/green/magenta/red/blue/black bars, a white center cross and a lower grayscale ramp. Its square-frame corners are naturally clipped by the circular visible display. Initialization delays and transfer waits occur only during startup; there is no polling or busy main loop. Stage 1 does not yet provide continuous updates or tearing synchronization.
+
+The generated default partition table remains temporary: NVS at `0x9000` (24 KB), PHY data at `0xf000` (4 KB), and a 1 MB factory application at `0x10000`. This is sufficient for board bring-up; the remaining 16 MB flash is not allocated for application data yet. OTA and filesystem partitions will be designed when their requirements are implemented.
+
+### Stage 1A implementation: manual brightness
+
+The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debounced press:
+
+```text
+20 -> 10 -> 0 -> 100 -> 90 -> 80 -> 70 -> 60 -> 50 -> 40 -> 30 -> 20 -> ...
+```
+
+- Brightness is a percentage from 0 to 100, initially 20 after every reboot. It is not persisted to flash.
+- `main/input/brightness_button.cpp` configures the verified active-low GPIO as an input and samples it every 10 ms in a dedicated FreeRTOS task. Press and release each require 50 ms of stable input. Holding the button does not repeat. A button held when the task starts must first be released before it can trigger a step.
+- `main/input/button_debouncer.h` isolates the debounce state machine. Brightness changes occur in task context, not an ISR, and `app_main` returns normally. The existing FreeRTOS 100 Hz tick rate needs no configuration changes.
+- `display::decrease_brightness()` is the single owner of brightness state; it sends the CO5300 brightness command and updates the tracked value only on success. Failures are logged; release and press again to retry. There are no other runtime display writers at this stage; future network/display work must serialize access before introducing concurrent writers.
+- 0% sets the brightness register to zero without powering off the board or discarding the image. The next press wraps directly to 100%, as requested. This is not panel sleep, an idle timeout or automatic burn-in protection; avoid prolonged static content at high brightness.
+- PWR remains reserved for Stage 2 AP control. No PMIC power-button, charging or regulator behavior is changed.
+
+The build includes compile-time assertions for the complete 11-step brightness cycle. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
+
+```powershell
+# After loading the ESP-IDF profile:
+xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp
+idf.py build
+```
+
+### Build and board acceptance
+
+The ESP-IDF 6.1 framework and tools are available after loading the Installation Manager profile:
+
+```powershell
+. C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1
+idf.py build
+```
+
+VS Code uses the ESP-IDF extension, the workspace-root `build` directory and `sdkconfig.defaults`; competing CMake Tools auto-configuration stays disabled. `idf.flashType` remains `UART`: this extension label selects esptool's serial transport, including the board's native USB Serial/JTAG COM port, not an external UART requirement. COM4 is the current port; update it if Windows assigns another port. The firmware console uses USB Serial/JTAG, and the monitor is configured for 115200.
+
+Generated `build/` and `sdkconfig` are ignored. Defaults apply when `sdkconfig` is first generated; an existing configuration can override them. For a scaffold configuration without PSRAM/USB-console settings, preserve a copy of `sdkconfig`, remove the generated original, then reconfigure/build to apply Stage 1 defaults. Do not discard intentional menuconfig changes without reviewing them. After relocating a project or build directory, use **ESP-IDF: Full Clean Project** before rebuilding: generated CMake response files contain absolute paths.
+
+No firmware flash is authorized by implementation or build alone. The factory backup at `backups/factory-backup.bin` must remain untouched, and flashing requires explicit approval.
+
+After approval, hardware acceptance consists of:
+
+1. Flash through the native USB Serial/JTAG COM port using ESP-IDF's serial/esptool transport, without a full-chip erase or eFuse operations.
+2. Monitor boot and confirm the PSRAM memory test passes and `PSRAM detected: 8388608 bytes` is logged.
+3. Confirm AXP2101 identification/ADC readback and CO5300 initialization succeed without resets or DMA timeout errors.
+4. Confirm the visible test pattern has correct colors, a centered cross and smooth black-to-white grayscale, at reduced brightness.
+5. Reboot and repeat. Avoid leaving a static AMOLED test pattern on for extended periods.
+
+A successful build verifies compilation and configuration, not physical panel operation or PWR-button safety. Hardware acceptance remains pending until an approved flash and board test.
+
+Software validation (2026-11-05): the ESP-IDF 6.1 ESP32-S3 build and Stage 1A compile-time logic tests pass. The firmware image with brightness-button control is 255,184 bytes, leaving 76% of the temporary 1 MB app partition free. Generated configuration checks confirm octal PSRAM at 80 MHz with boot memory test, 240 MHz CPU, USB Serial/JTAG console, 16 MB flash, no LVGL dependency and no Secure Boot/Flash Encryption enablement. ESP-IDF itself emits existing Kconfig/dependency warnings; these are not firmware compilation errors.
+
+Stage 1A physical acceptance after an approved flash: confirm successive GPIO18 presses give `10%, 0%, 100%, 90%` starting from 20%, continue through the full cycle, hold the button to verify no repeat, and reboot to confirm the default returns to 20%. Confirm the image is retained at 0% and reappears on the next press, and that BOOT/PWR are not used for dimming. Physical debounce and panel-brightness behavior remain pending board validation.
 
 Before coding:
 
@@ -382,6 +472,14 @@ Then implement in small, independently testable stages:
 - Initialize PSRAM.
 - Initialize the AMOLED display.
 - Display a simple test pattern or text.
+
+### Stage 1A — User-button brightness
+
+- Verify GPIO18 user-button wiring and pressed polarity.
+- Decrease brightness by 10 percentage points per debounced press, wrapping 0 to 100.
+- Preserve the 20% startup default; do not repeat while held.
+- Keep PWR dedicated to the planned AP toggle.
+- Build/test the cycle and debounce logic, then verify on hardware after flash approval.
 
 ### Stage 2 — Physical input
 
