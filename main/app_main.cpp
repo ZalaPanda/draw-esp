@@ -75,6 +75,12 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(power_management::initialize());
     ESP_ERROR_CHECK(display::initialize());
+    // Brightness transitions intentionally update the panel several times. Keep the
+    // component's per-step INFO messages out of the console while retaining warnings.
+    esp_log_level_set("co5300_spi", ESP_LOG_WARN);
+    // spi_master logs a DEBUG line per bus lock/release; with the sound bar redrawn every
+    // 20 ms that saturates the 115200-baud console and stalls the logging tasks.
+    esp_log_level_set("spi_master", ESP_LOG_INFO);
     ESP_ERROR_CHECK(image_store::initialize());
     if (!restore_last_image()) {
         ESP_ERROR_CHECK(display::show_test_pattern());
@@ -88,7 +94,7 @@ extern "C" void app_main(void)
     ESP_LOGI(kTag, "Stage 2 ready: PWR short press toggles AP; long-press PMIC behavior is unchanged");
 
     ESP_ERROR_CHECK(input::start_brightness_button());
-    ESP_LOGI(kTag, "Stage 1A ready: user button cycles brightness by -10%%, wrapping 0%% to 100%%");
+    ESP_LOGI(kTag, "Stage 8 ready: GPIO18 toggles the sound bar and wakes the display; sound/upload/clear/rotation also renew activity");
 
     ESP_ERROR_CHECK(input::start_orientation_monitor());
     ESP_LOGI(kTag, "Stage 5 ready: QMI8658 stable-orientation image rotation enabled");

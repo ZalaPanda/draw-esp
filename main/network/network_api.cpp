@@ -20,6 +20,28 @@ constexpr char kTag[] = "network-api";
 constexpr size_t kMaximumImageUpload = 1024 * 1024;
 httpd_handle_t server = nullptr;
 
+void log_api_call(const httpd_req_t *request)
+{
+    const char *method = "UNKNOWN";
+    switch (request->method) {
+    case HTTP_GET: method = "GET"; break;
+    case HTTP_POST: method = "POST"; break;
+    case HTTP_DELETE: method = "DELETE"; break;
+    case HTTP_PUT: method = "PUT"; break;
+    case HTTP_PATCH: method = "PATCH"; break;
+    case HTTP_HEAD: method = "HEAD"; break;
+    case HTTP_OPTIONS: method = "OPTIONS"; break;
+    default: break;
+    }
+    char path[64] = {};
+    size_t length = 0;
+    while (request->uri[length] != '\0' && request->uri[length] != '?' && length < sizeof(path) - 1) {
+        path[length] = request->uri[length];
+        ++length;
+    }
+    ESP_LOGI(kTag, "HTTP %s %s", method, path);
+}
+
 esp_err_t send_json(httpd_req_t *request, cJSON *root, const char *status = "200 OK")
 {
     char *body = cJSON_PrintUnformatted(root);
@@ -79,6 +101,7 @@ bool get_string(cJSON *root, const char *name, const char *&value)
 
 esp_err_t handle_root(httpd_req_t *request)
 {
+    log_api_call(request);
     static constexpr char page[] = R"HTML(<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32 Display</title><style>body{font:16px system-ui;max-width:680px;margin:2rem auto;padding:0 1rem;color:#18202a}section{padding:1rem;margin:1rem 0;border:1px solid #ccd3dc;border-radius:10px}label{display:block;margin:.6rem 0}input,select,button{font:inherit;padding:.5rem}pre{white-space:pre-wrap}</style><h1>ESP32 Image Display</h1><section><h2>Status</h2><pre id="status">Loading…</pre><button onclick="refresh()">Refresh</button></section><section><h2>Upload image</h2><input id="image" type="file" accept="image/jpeg,image/png,image/bmp"><img id="preview" style="display:none;max-width:100%;margin-top:1rem"><label>Fit <select id="fit"><option>contain</option><option>cover</option><option>stretch</option></select></label><button onclick="upload()">Upload</button> <button onclick="clearDisplay()">Clear display</button></section><section><h2>Wi-Fi</h2><form id="wifi"><label>SSID <input name="ssid" required maxlength="32"></label><label>Password <input name="password" type="password" maxlength="64"></label><button>Save and connect</button></form><p id="message"></p></section><script>const msg=x=>document.getElementById('message').textContent=x;async function refresh(){try{let [d,n]=await Promise.all(['/api/device','/api/network'].map(x=>fetch(x).then(r=>r.json())));document.getElementById('status').textContent=JSON.stringify({device:d,network:n},null,2)}catch(e){msg(e.message)}}document.getElementById('image').onchange=e=>{let f=e.target.files[0],p=document.getElementById('preview');if(f){p.src=URL.createObjectURL(f);p.style.display='block'}};async function upload(){let f=document.getElementById('image').files[0];if(!f)return msg('Choose an image first');let r=await fetch('/api/image?fit='+document.getElementById('fit').value,{method:'POST',headers:{'Content-Type':f.type},body:f});msg(await r.text())}async function clearDisplay(){let r=await fetch('/api/image',{method:'DELETE'});msg(await r.text())}document.getElementById('wifi').onsubmit=async e=>{e.preventDefault();let o=Object.fromEntries(new FormData(e.target));let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});msg(await r.text());refresh()};refresh();setInterval(refresh,10000)</script></html>)HTML";
     httpd_resp_set_type(request, "text/html; charset=utf-8");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
@@ -87,6 +110,7 @@ esp_err_t handle_root(httpd_req_t *request)
 
 esp_err_t handle_clear_image(httpd_req_t *request)
 {
+    log_api_call(request);
     const esp_err_t store_error = image_store::clear();
     if (store_error != ESP_OK) return send_error(request, "500 Internal Server Error", esp_err_to_name(store_error));
     const esp_err_t error = display::clear();
@@ -99,6 +123,7 @@ esp_err_t handle_clear_image(httpd_req_t *request)
 
 esp_err_t handle_upload_image(httpd_req_t *request)
 {
+    log_api_call(request);
     if (request->content_len <= 0 || static_cast<size_t>(request->content_len) > kMaximumImageUpload) {
         return send_error(request, "413 Payload Too Large", "Image must be between 1 byte and 1 MiB");
     }
@@ -187,6 +212,7 @@ esp_err_t handle_upload_image(httpd_req_t *request)
 
 esp_err_t handle_device(httpd_req_t *request)
 {
+    log_api_call(request);
     cJSON *root = cJSON_CreateObject();
     if (root == nullptr) {
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON allocation failed");
@@ -201,6 +227,7 @@ esp_err_t handle_device(httpd_req_t *request)
 
 esp_err_t handle_network(httpd_req_t *request)
 {
+    log_api_call(request);
     network::Status status = {};
     const esp_err_t error = network::get_status(status);
     if (error != ESP_OK) {
@@ -230,6 +257,7 @@ esp_err_t handle_network(httpd_req_t *request)
 
 esp_err_t handle_set_wifi(httpd_req_t *request)
 {
+    log_api_call(request);
     cJSON *root = nullptr;
     esp_err_t error = receive_json(request, &root);
     if (error != ESP_OK) {
@@ -258,6 +286,7 @@ esp_err_t handle_set_wifi(httpd_req_t *request)
 
 esp_err_t handle_delete_wifi(httpd_req_t *request)
 {
+    log_api_call(request);
     const esp_err_t error = network::clear_station_credentials();
     if (error != ESP_OK) {
         return send_error(request, "500 Internal Server Error", esp_err_to_name(error));
@@ -272,6 +301,7 @@ esp_err_t handle_delete_wifi(httpd_req_t *request)
 
 esp_err_t handle_set_ap_password(httpd_req_t *request)
 {
+    log_api_call(request);
     cJSON *root = nullptr;
     const esp_err_t parse_error = receive_json(request, &root);
     if (parse_error != ESP_OK) {

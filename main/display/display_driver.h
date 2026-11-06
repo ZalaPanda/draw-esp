@@ -12,6 +12,8 @@ esp_err_t show_rgb565(const uint16_t *pixels, int width, int height, FitMode fit
 esp_err_t restore_rgb565(const uint16_t *pixels, int width, int height, FitMode fit);
 esp_err_t set_rotation(Rotation rotation);
 esp_err_t clear();
-esp_err_t decrease_brightness();
-esp_err_t update_noise_indicator(unsigned level_percent, bool over_threshold);
+// The reason must have static storage; success means queued, not physically completed.
+esp_err_t notify_activity(const char *reason);
+esp_err_t update_noise_indicator(unsigned level_percent, unsigned threshold_percent);
+esp_err_t set_noise_indicator_visible(bool visible);
 }

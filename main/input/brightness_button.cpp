@@ -13,6 +13,7 @@ namespace {
 constexpr char kTag[] = "brightness-button";
 static_assert(pdMS_TO_TICKS(10) > 0, "Button polling requires a FreeRTOS tick rate of at least 100 Hz");
 bool started = false;
+bool indicator_visible = false;
 
 void button_task(void *)
 {
@@ -20,11 +21,16 @@ void button_task(void *)
                                   xTaskGetTickCount(), pdMS_TO_TICKS(50));
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(10));
-        if (button.sample(gpio_get_level(board::kUserButton) == 0, xTaskGetTickCount())) {
-            const esp_err_t error = display::decrease_brightness();
-            if (error != ESP_OK) {
-                ESP_LOGE(kTag, "Button brightness change failed: %s; release and press to retry",
-                         esp_err_to_name(error));
+        bool pressed = false;
+        if (button.sample(gpio_get_level(board::kUserButton) == 0, xTaskGetTickCount(), pressed)) {
+            ESP_LOGI(kTag, "User button %s", pressed ? "pressed" : "released");
+            if (pressed) {
+                indicator_visible = !indicator_visible;
+                const esp_err_t error = display::set_noise_indicator_visible(indicator_visible);
+                if (error != ESP_OK) {
+                    ESP_LOGE(kTag, "Indicator visibility toggle failed: %s; release and press to retry",
+                             esp_err_to_name(error));
+                }
             }
         }
     }
@@ -45,7 +51,7 @@ esp_err_t start_brightness_button()
     ESP_RETURN_ON_FALSE(xTaskCreate(button_task, "brightness", 3072, nullptr, 3, nullptr) == pdPASS,
                         ESP_ERR_NO_MEM, kTag, "Brightness-button task creation failed");
     started = true;
-    ESP_LOGI(kTag, "GPIO18 active-low button ready; 50 ms debounce, one step per press");
+    ESP_LOGI(kTag, "GPIO18 active-low button ready; debounced sound bar visibility toggle");
     return ESP_OK;
 }
 }

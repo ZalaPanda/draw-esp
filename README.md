@@ -148,7 +148,7 @@ Responsibilities:
 - Manage framebuffer memory.
 - Support RGB565 as the internal rendering format.
 - Display images at 480×480.
-- Reserve a 10-pixel strip on the left for the live noise-level indicator; fit images in the remaining 470×480 area.
+- Fit images across the full 480×480 area. Stage 8 optionally overlays a 20-pixel-wide noise indicator at x=10–29 without changing image placement.
 - Clear the display.
 - Handle image updates without unnecessary flickering.
 
@@ -404,14 +404,14 @@ The project implements board initialization (Stage 1), user-button brightness co
 - `main/system/power_management.cpp` uses native ESP-IDF I2C to verify the AXP2101 and enable voltage ADCs with read-modify-write and readback. Existing regulator voltages/enables, charger/temperature-sensor settings, interrupts and PWR-key behavior are deliberately preserved. The official display example likewise does not reprogram the display supply. This is not a battery-charging policy or power-control implementation.
 - `app_main` requires initialized PSRAM with exactly 8,388,608 detected bytes. ESP-IDF's boot memory test is enabled and missing PSRAM is fatal rather than silently falling back to internal RAM.
 - `main/display/display_driver.cpp` uses the managed `espressif/esp_lcd_co5300` **2.2.0** component with the verified Waveshare panel sequence. The full BSP is not linked because it unconditionally depends on LVGL and unrelated audio/touch/USB components. `dependencies.lock` records the resolved driver and build-helper versions.
-- A 460,800-byte native-order RGB565 framebuffer is allocated in PSRAM. A single 15,360-byte internal DMA staging buffer sends 16-row stripes in panel-required big-endian pixel order. Each transfer waits for its completion callback with a bounded timeout before reusing the buffer. Buffers remain allocated for the application's lifetime; allocation, bus, panel and transfer failures are logged and fatal during bring-up.
+- A 460,800-byte native-order RGB565 framebuffer is allocated in PSRAM. A single 19,200-byte internal DMA staging buffer sends 20-row stripes in panel-required big-endian pixel order; this also holds the full 20×480-pixel indicator update. Each transfer waits for its completion callback with a bounded timeout before reusing the buffer. Buffers remain allocated for the application's lifetime; allocation, bus, panel and transfer failures are logged and fatal during bring-up.
 - The panel is blanked while uploading the pattern, then enabled at 20% brightness. The pattern contains white/yellow/cyan/green/magenta/red/blue/black bars, a white center cross and a lower grayscale ramp. Its square-frame corners are naturally clipped by the circular visible display. Initialization delays and transfer waits occur only during startup; there is no polling or busy main loop. Stage 1 does not yet provide continuous updates or tearing synchronization.
 
 The custom partition table in `partitions.csv` keeps NVS at `0x9000` (24 KB) and PHY data at `0xf000` (4 KB), allocates a 2.5 MiB factory application at `0x10000`, and reserves two 1.0625 MiB data slots for crash-safe last-image updates. OTA and a general filesystem remain unallocated. Updating firmware with this partition table changes the on-flash layout; it must be flashed without a full-chip erase, and the existing factory backup must remain untouched.
 
-### Stage 1A implementation: manual brightness
+### Stage 1A implementation: manual brightness (historical; replaced by Stage 8)
 
-The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debounced press:
+The original Stage 1A GPIO18 behavior (KEY3, not BOOT or PWR) changed brightness once per debounced press:
 
 ```text
 20 -> 10 -> 0 -> 100 -> 90 -> 80 -> 70 -> 60 -> 50 -> 40 -> 30 -> 20 -> ...
@@ -423,6 +423,7 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 - `display::decrease_brightness()` is the single owner of brightness state; it sends the CO5300 brightness command and updates the tracked value only on success. Failures are logged; release and press again to retry. There are no other runtime display writers at this stage; future network/display work must serialize access before introducing concurrent writers.
 - 0% sets the brightness register to zero without powering off the board or discarding the image. The next press wraps directly to 100%, as requested. This is not panel sleep, an idle timeout or automatic burn-in protection; avoid prolonged static content at high brightness.
 - PWR remains reserved for Stage 2 AP control. No PMIC power-button, charging or regulator behavior is changed.
+- Stage 8 has replaced this cycle: GPIO18 toggles sound-bar visibility and counts as activity, waking the display and restarting its idle timer.
 
 ### Stage 2 implementation: AXP2101 PWR button
 
@@ -449,18 +450,20 @@ The GPIO18 user button (KEY3, not BOOT or PWR) changes brightness once per debou
 ### Stage 5 implementation: JPEG decode and display fitting
 
 - `main/image/jpeg_decoder.cpp` uses Espressif's `esp_jpeg` component. It inspects JPEG dimensions before allocating decoded output and selects the largest decoder scale that keeps the result at or below 480 × 480. The compressed request and decoded RGB565 pixels use PSRAM; decoded memory is capped at one display frame.
-- `display::show_rgb565()` serializes against brightness and clear operations, applies `contain`, `cover`, or `stretch` using nearest-neighbor sampling into the 470×480 image area, flushes the frame, then enables the panel. The leftmost 10 pixels are reserved for the Stage 7 indicator.
+- `display::show_rgb565()` serializes against brightness and clear operations, applies `contain`, `cover`, or `stretch` using nearest-neighbor sampling across the full 480×480 image area, flushes the frame, then requests activity from the display-control task. The Stage 8 indicator is an optional overlay, not reserved image space.
 - The display retains a PSRAM copy of the latest decoded image so orientation changes can redraw it without another upload. `clear()` releases that copy.
 - `POST /api/image` decodes JPEG, PNG, and BMP and returns width, height, format, and fit on success. PNG and BMP inputs are limited to 480 × 480 pixels to bound decoder memory. PNG transparency is composited onto black. BMP support is limited to uncompressed 24-bit and 32-bit files; palette, bitfield-compressed, and other encodings are rejected. Progressive JPEG support follows the limits of the bundled decoder and may be rejected as malformed. Stage 6 stores the successfully decoded upload's original compressed bytes in flash for restart recovery.
 - `main/input/orientation.cpp` initializes the QMI8658 at address `0x6B` on the PMIC module's existing 400 kHz GPIO14/15 I²C bus. It samples accelerometer data every 100 ms and accepts a new orientation after eight consecutive samples with at least 0.70 g on a dominant in-plane axis. Face-up/down and diagonal positions retain the last orientation, providing hysteresis against boundary flicker. The accelerometer runs at 125 Hz in ±4 g range; the gyroscope is left disabled. The managed driver 2.0.2 header declares `qmi8658_read_accel_mps2()`, but that version does not define it, so the firmware uses the implemented `qmi8658_read_accel()` with m/s² units enabled.
 - Orientation is applied in software before fitting, so all three fit modes rotate with the display while panel initialization stays fixed. The mapping assumes the sensor X/Y axes lie in the display plane: +Y is 0°, −X is 90°, −Y is 180°, and +X is 270°. Confirm the physical mapping and stability on the board; sensor-axis mounting and orientation cannot be confirmed by a host build.
 
-The build includes compile-time assertions for the complete 11-step brightness cycle. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
+The Stage 1A 11-step brightness-cycle assertions were removed with that cycle in Stage 8. `tests\activity_state_test.cpp` covers brightness ramps, `0x51` raw values, idle deadlines, and activity sources; `tests\sound_events_test.cpp` covers sound qualification, re-arm, event windows, baseline protection, and configuration validity. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
 
 ```powershell
 # After loading the ESP-IDF profile:
-xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp
-idf.py build
+xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp tests\activity_state_test.cpp tests\sound_events_test.cpp
+if ($LASTEXITCODE -ne 0) { throw "Logic regression tests failed" }
+python "$env:IDF_PATH\tools\idf.py" build
+if ($LASTEXITCODE -ne 0) { throw "Firmware build failed" }
 ```
 
 ### Build and board acceptance
@@ -563,29 +566,67 @@ Then implement in small, independently testable stages:
 ### Stage 7 — Noise-level indicator
 
 - Capture a short-window RMS sound level from the onboard ES7210 microphones.
-- Compare it to a slowly adapting ambient-noise baseline and show the relative level in a 10-pixel-wide vertical strip reserved at the left edge of the display.
+- Compare it to a slowly adapting ambient-noise baseline and show the relative level in a 20-pixel-wide vertical strip reserved at the left edge of the display.
 - Keep this stage informational only: do not change display brightness or trigger other device actions when the threshold is crossed.
 - Verify microphone capture, level response, threshold marker, image fitting, and display rotations on the board.
 
-### Stage 6 implementation — persistent last image and timed brightness
+### Stage 8 — Sound-triggered presence and display power (implemented; board validation pending)
+
+Stage 7 remains the sound-level measurement and indicator foundation. Stage 8 adds presence-like sound activity behavior, automatic display visibility, configurable timings, and repurposes the GPIO18 user key. Sound is only a proxy for nearby activity: loud background sounds can wake the display, and a quiet person may not. Do not describe it as reliable person detection.
+
+- On a successful new image upload, turn the panel on, smoothly ramp brightness to 80% over 800 ms, and start/restart the 30-second activity timer.
+- Continue microphone measurement while the display is idle or off. Two distinct qualifying sound events within a 10-second window count as activity; wake the panel, smoothly ramp to 80% over 800 ms, and restart the 30-second timer.
+- Define one event as the measured level reaching at least the configured wake threshold continuously for 100 ms (five 20 ms measurement windows). It cannot count again until the level stays below the configured re-arm threshold for 250 ms (about 13 windows). A sustained sound is one event; speech or music with longer pauses can still count twice.
+- If no activity occurs during the 30-second timer, smoothly ramp brightness to 0% over 800 ms, then turn the display panel off. Establish 0% before switching an idle panel on and ramping brightness back up.
+- Keep the sound bar hidden after boot. A debounced GPIO18 user-key press toggles the bar and counts as activity. Stable orientation changes and successful image clear also count as activity; all wake the panel, ramp to the active brightness, and restart the idle timer. This intentionally extends the original Stage 8 rule that the key only toggled the bar. Microphone measurement continues while the bar is hidden or panel off.
+- Overlay the 20-pixel-wide bar at horizontal pixel coordinates x=10 through x=29, leaving 10 pixels between the left edge and the bar. Keep the image fitted to the full 480×480 display underneath. When the bar is hidden, show the unobstructed image in that area; toggling visibility does not change image placement.
+- Color the bar green below the configured wake threshold and red at or above it. Use the same wake-threshold setting for event detection and the green/red color split; remove the current fixed +12 dB yellow marker in Stage 8.
+- ESP-IDF `menuconfig` options in `main/Kconfig.projbuild` configure active brightness (default 80%), idle timeout (30 seconds), brightness ramp duration (800 ms), wake threshold (default 50%), event qualification duration (100 ms), re-arm threshold (default 30%), re-arm duration (250 ms), required events (2), and event window (10 seconds). These are build-time settings, not runtime controls. Kconfig defaults apply only to options missing from the generated `sdkconfig`; the current local `sdkconfig` has been updated to these values, and an older generated `sdkconfig` must be updated explicitly (menuconfig or editing its `CONFIG_APP_*` lines).
+- Keep detection distinct from visual updates and prevent the ambient baseline from absorbing an ongoing event. Threshold percentages are relative to the 0–30 dB scale, not calibrated sound pressure: 50% wake is +15 dB (~5.6× ambient RMS), and 30% re-arm is +9 dB (~2.8×). These replace the earlier 80/60 and 60/40 trials by user request, keeping 6 dB hysteresis and the two-event requirement, and still require physical sensitivity/false-positive testing. Tune them with the INFO qualified/rejected/re-arm `noise-level` messages recorded during intended sounds and ordinary background noise.
+- Validate the event counter with quiet, sustained, intermittent, and background-noise cases; verify hidden/visible bar behavior, uploads while the panel is off, smooth brightness transitions, image fitting, and microphone monitoring while the panel is off. Physical validation is required to tune thresholds and confirm panel power behavior.
+
+### Stage 6 implementation — persistent last image and timed brightness (timing superseded by Stage 8)
 
 - `partitions.csv` provides two alternating raw flash slots, each large enough for the maximum 1 MiB compressed upload plus metadata. The slots are separate from NVS and the application partition.
 - `main/image/image_store.cpp` stores the original compressed JPEG/PNG/BMP bytes, selected fit mode, generation, and CRC32. Each update is written to the inactive slot and commits its header last, so a power loss during an upload leaves the previous image recoverable. `DELETE /api/image` writes a clear marker so the old slot is not restored after reboot.
 - At startup, the firmware validates the newest saved record, decodes it, and renders it at the normal 20% startup brightness. If there is no saved image or the saved data is invalid, it displays the existing test pattern.
-- A successful image upload displays at 100% for 30 seconds, then returns to 20%. Each new upload restarts the timer. A manual GPIO18 brightness press cancels the timer and resumes the existing manual brightness cycle.
-- Clearing the display cancels the timer, sets brightness to 20%, and commits a persistent clear marker.
+- Historically, uploads displayed at 100% for 30 seconds before returning to 20%, and GPIO18 resumed manual brightness control. Stage 8 replaces this with activity-controlled 80% brightness and fade-to-off.
+- Clearing still commits a persistent clear marker. In Stage 8 it also wakes the display and restarts the activity timer instead of setting 20%.
 - Flashing the firmware with the custom partition table is required for this feature. Do not use a full-chip erase; preserve the factory backup. The new storage behavior and recovery after interrupted writes require board testing.
 
 Stage 6 software validation (2026-11-05): ESP-IDF 6.1 build passes with the custom partition table and persistent-image/timed-brightness code. The firmware binary is 0x104430 bytes, leaving 0x17bbd0 bytes (59%) of the 2.5 MiB factory app partition free. No firmware was flashed during implementation. Board validation of reboot recovery, `/api/image` deletion persistence, interrupted writes, and the 30-second brightness cycle remains pending.
 
-### Stage 7 implementation — microphone noise-level indicator
+### Stage 7 implementation — microphone noise-level indicator (updated by Stage 8)
 
 - `main/input/noise_level.cpp` captures both onboard microphones through the ES7210 ADC using ESP-IDF I2S and Espressif's `esp_codec_dev` **1.5.8** component. It reuses the shared I2C bus created by power management; capture clocks and data use GPIO42 (MCLK), GPIO9 (BCLK), GPIO45 (LRCK), and GPIO10 (data in).
-- Each 20 ms capture window produces an RMS level. A slowly adapting room-noise baseline is used as the relative reference. The bar maps 0–30 dB above that baseline to 0–100%; its yellow horizontal marker is at +12 dB. The baseline follows ordinary level changes slowly; a level over 3× baseline must persist for 2 seconds before it starts redefining the baseline. This is a relative indicator, not calibrated dB SPL.
-- `main/display/display_driver.cpp` reserves the leftmost 10 pixels for a vertical level bar and fits images into the remaining 470×480 area. The marker is yellow, the bar is green below the threshold, and red at or above the threshold. The audio task sends only this narrow strip to the panel, reuses the existing DMA staging buffer, and serializes updates through the display mutex.
-- This stage is visual only: crossing the threshold does not change panel brightness, trigger another action, save audio, or transmit audio. Microphone capture and the adaptive baseline require physical validation on the board; the host build cannot confirm codec wiring, gain, sample quality, or useful threshold sensitivity.
+- Each complete 20 ms capture window produces an RMS level relative to a slowly adapting ambient baseline. The bar maps 0–30 dB above baseline to 0–100%. The original yellow +12 dB marker was removed in Stage 8; the bar is green below the wake threshold and red at/above it. Baseline adaptation is frozen during qualification and after a qualified event until below-threshold re-arm, for at most 5 seconds (`kMaxBaselineHoldMs`), so sustained sound cannot create repeated events by redefining its own reference. The cap prevents a deadlock observed on the board: a baseline initialized from an all-zero start-up window (1e-6) kept ordinary room noise at 100%, which blocked re-arm, which kept the baseline frozen. All-zero PCM windows are now ignored by the baseline, which initializes from the first non-zero window and never falls below one 16-bit LSB RMS (1/32768). Outside protected events, ordinary levels adapt slowly; levels over 3× baseline require 2 seconds before upward adaptation. This is not calibrated dB SPL.
+- Stage 7 originally reserved the leftmost 20 pixels for the bar. Stage 8 overlays the bar at x=10–29 while fitting the image across the full 480×480 display; the bar is hidden at boot and can be toggled with GPIO18.
+- Microphone capture and the adaptive baseline require physical validation on the board; the host build cannot confirm codec wiring, gain, sample quality, or useful threshold sensitivity.
 
-Stage 7 software validation (2026-11-05): ESP-IDF 6.1 ESP32-S3 build passes with ES7210 capture support and the 10-pixel indicator strip. The binary is 0x1111f0 bytes; 0x16ee10 bytes (57%) remain in the 2.5 MiB application partition. Physical microphone capture and indicator behavior remain pending board validation. No firmware was flashed.
+Stage 7 software validation (2026-11-05): ESP-IDF 6.1 ESP32-S3 build passed with ES7210 capture support and the original 10-pixel indicator strip. Stage 8 changes the indicator rendering and adds sound-triggered behavior; the new build result is recorded below. Physical microphone capture and indicator behavior remain pending board validation. No firmware was flashed.
+
+### Stage 8 implementation — sound activity, idle panel, and indicator visibility
+
+- The sound monitor maps the relative RMS level to the existing 0–100 indicator scale. A candidate event must remain at or above the configurable wake threshold for the configured qualification period. Once qualified, it cannot count again until the level remains below the re-arm threshold for its configured duration. The default is two events within 10 seconds.
+- Two qualified events, a successful image upload/clear, a stable orientation change, or a GPIO18 bar toggle restart the activity timer and request the active brightness. One persistent display-control task owns runtime panel on/off, idle deadlines, and ramp progression; raw redraws never independently power it on. The task runs even if microphone capture fails. Startup/restore remains 20% until activity or idle timeout.
+- Ramps interpolate with signed arithmetic and monotonic elapsed time. Activity interrupts fade-out from the last successfully applied value; activity during fade-in only renews the deadline without restarting/starving the ramp. An idle panel starts at 0% before on, and off is commanded only after a successful 0% write. Queue/command errors are logged explicitly; a failed transition stops and the next activity retries rather than falsely reporting completion.
+- ES7210 setup enables initialized RX before codec open, matching the codec's disable/reconfigure/enable sequence and avoiding the initial unenabled-channel error. A complete I2S window is read successfully before capture is declared ready. The codec's record-only "No paired data" INFO message is normal; it refers to absent playback, not missing microphones.
+- Capture uses checked native I2S reads, including exact byte counts. Read errors, queue overflow, and excessive processing gaps reset qualification/re-arm continuity. Durations count observed 20 ms audio windows (100 ms is exactly five windows); they never count missing wall time as observed sound. Event timestamps use a rolling window, including event counts above two. Invalid threshold ordering or infeasible event timings fail at compile time.
+- Indicator measurements are posted through a one-item overwrite queue. The display task renders the latest value without making capture wait on panel transfers. Indicator state and visibility changes are synchronized with the existing display mutex.
+- This stage supersedes Stage 6's fixed 100%-for-30-seconds upload brightness and GPIO18 manual brightness cycle. The default active brightness is now 80%, with a configurable 30-second idle timeout.
+- GPIO18 toggles indicator visibility and requests activity wake. The indicator starts hidden, overlays x=10–29 and y=10–469 (10-pixel margins at the top and bottom), and uses green below the wake threshold and red at or above it. Hiding the bar redraws its full column from the image framebuffer to remove all bar pixels. Image fitting remains full-screen and unchanged when visibility toggles.
+- `main/Kconfig.projbuild` exposes active brightness, idle timeout, ramp duration, wake threshold, qualification duration, re-arm threshold/duration, required event count, and event window as build-time options.
+- Redundant brightness writes are skipped. The CO5300 SPI driver's per-step INFO messages are filtered to WARN, and the ESP-IDF `spi_master` tag is capped at INFO because it logs one DEBUG line per bus lock/release; with the sound bar redrawn every 20 ms that flood exceeds the 115200-baud console. Application INFO logs report activity reason/deadline, ramp request/cancellation/completion/failure, commanded panel state, and applied brightness percent/raw value. DEBUG logs report every changed ramp value. Qualified events, rejected candidates (sound that reached the wake threshold but dropped below it before the qualification time), partial-window expiration, re-arm, baseline initialization, baseline-hold expiry, and capture-health changes are visible at INFO/WARN/ERROR. The former once-per-second DEBUG RMS/baseline line was removed by user request.
+- Brightness uses CO5300 command `0x51`, not an application PWM pin: raw = floor(percent × 255 / 100), so 0%=0x00, 20%=0x33, 80%=0xCC, and 100%=0xFF. "Applied" and panel state mean the driver command succeeded, not register readback or measured luminance. Physical verification is still required.
+- For per-step brightness diagnostics, enable DEBUG logging in menuconfig under Component config → Log output, rebuild, and inspect tag `display`. The local configuration uses INFO, which is sufficient for transition endpoints and sound events. `sdkconfig.defaults` retains DEBUG as a maximum compile level without increasing the default output level on fresh configurations.
+- INFO logs record HTTP method/path, SoftAP client joins, GPIO18 user-key debounced press/release edges, and display wake/sleep transitions with their reason. The AXP2101 reports PWR short-press events, not separate down/up edges; BOOT is tied to GPIO0/CHIP_PU reset behavior and is not polled as a runtime key.
+- Sound remains a proxy for nearby activity, not reliable person detection. The relative indicator scale is not calibrated sound pressure. No audio is stored or transmitted.
+
+Stage 8 software validation (2026-11-05): ESP-IDF 6.1 ESP32-S3 build passes after sizing the internal DMA staging buffer to 19,200 bytes for the 20-row image stripe and full-height indicator update. After the bar margin, hide-redraw, brightness, and diagnostic logging changes, the firmware image is 0x111b10 bytes (57% of the 2.5 MiB app partition remains free). No firmware was flashed. Physical testing of event classification, bar controls, panel power, and activity timeout remains pending.
+
+Stage 8 repair findings: unsigned interpolation drove downward fades to 100%; a stale timestamp subtraction scheduled sleep immediately after sound wake; orientation/clear independently turned the panel back on without renewing the idle timer; per-request ramp tasks and unsynchronized activity state allowed races; baseline updates/read gaps undermined continuous-event timing; event expiration and applied brightness were not logged; codec setup disabled an RX channel that had never been enabled. The supplied log already contained `2/2`; isolated `1/2` entries more than 10 seconds apart correctly expired but lacked reset diagnostics. Regression tests cover every brightness start/target pair, monotonic bounds/endpoints, interrupted ramps, activity deadlines/sources, qualification/re-arm boundaries, capture discontinuities, rolling-window expiry, baseline protection, and configuration validity. Hardware validation and final sensitivity tuning remain pending; no flashing is implied by a successful build.
+
+Stage 8 repair software validation (2026-11-05): target-compiler C++17 regression assertions and the ESP-IDF 6.1 build pass with 60/40 sound thresholds. The ISR overflow counter uses ESP-IDF critical sections rather than assuming lock-free C++ atomics. Build completion is checked through the ESP-IDF Python entry point and process exit code. The firmware image is 0x11b220 bytes, leaving 56% of the 2.5 MiB application partition free; hardware tests, including actual luminance and wake sensitivity, remain pending an approved flash.
 
 ## 13. Critical development rules
 

@@ -19,4 +19,92 @@ config APP_STA_PASSWORD
     help
         Password for the initial station network. Saved to NVS on first boot.
 
+config APP_ACTIVE_BRIGHTNESS
+    int "Active display brightness (%)"
+    range 1 100
+    default 80
+    help
+        Brightness the display ramps to on activity: a new image upload,
+        image clear, orientation change, GPIO18 sound-bar toggle, or
+        qualified sound events. Sent to the CO5300 as command 0x51 with
+        raw value percent * 255 / 100 (80% = 0xCC). After boot or image
+        restore the display stays at 20% until the first activity or idle
+        timeout.
+
+config APP_IDLE_TIMEOUT_SECONDS
+    int "Display idle timeout (seconds)"
+    range 1 3600
+    default 30
+    help
+        Time without activity before the display fades to 0% and the panel
+        is turned off. Every activity restarts the timer. Microphone
+        monitoring continues while the panel is off.
+
+config APP_BRIGHTNESS_RAMP_MS
+    int "Display brightness ramp duration (ms)"
+    range 0 5000
+    default 800
+    help
+        Duration of the smooth fade when waking (to active brightness) and
+        when going idle (to 0% before the panel turns off). 0 switches
+        brightness immediately. Activity during a fade-out reverses it from
+        the current brightness.
+
+config APP_WAKE_THRESHOLD
+    int "Sound wake threshold (% of indicator scale)"
+    range 1 100
+    default 50
+    help
+        Relative to ambient RMS on the 0-30 dB scale, not absolute sound
+        pressure. 50% means +15 dB. Must exceed the re-arm threshold.
+        The sound bar is green below this value and red at or above it.
+        Lower values react to quieter sounds but cause more false wakes.
+
+config APP_EVENT_QUALIFY_MS
+    int "Sound event qualification duration (ms)"
+    range 20 2000
+    default 100
+    help
+        How long the level must stay continuously at or above the wake
+        threshold to count as one event. Sound is measured in 20 ms
+        windows, so values round up to a multiple of 20 ms (100 ms = five
+        windows). Shorter values count short knocks or claps but also more
+        brief background noises.
+
+config APP_REARM_THRESHOLD
+    int "Sound event re-arm threshold (% of indicator scale)"
+    range 1 99
+    default 30
+    help
+        Level must remain strictly below this value to re-arm. Must be
+        lower than the wake threshold. 30% means +9 dB above ambient.
+
+config APP_REARM_DURATION_MS
+    int "Sound event re-arm duration (ms)"
+    range 20 5000
+    default 250
+    help
+        After an event, how long the level must stay below the re-arm
+        threshold before another event can count. Rounds up to a multiple
+        of 20 ms. Shorter values let quick double knocks both count; longer
+        values stop continuous speech or music from counting repeatedly.
+
+config APP_REQUIRED_EVENTS
+    int "Qualified events required to wake display"
+    range 1 10
+    default 2
+    help
+        Number of qualified sound events within the counting window needed
+        to wake the display. 1 wakes on any single event; higher values
+        reduce false wakes from isolated background noises.
+
+config APP_EVENT_WINDOW_SECONDS
+    int "Sound event counting window (seconds)"
+    range 1 120
+    default 10
+    help
+        Rolling window for counting events. Events older than this are
+        dropped. The build fails if the required events cannot fit in this
+        window with the configured qualification and re-arm durations.
+
 endmenu

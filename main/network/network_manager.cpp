@@ -147,6 +147,9 @@ void wifi_event_handler(void *, esp_event_base_t base, int32_t event_id, void *e
     } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STOP) {
         ap_enabled.store(false);
         ESP_LOGI(kTag, "SoftAP stopped");
+    } else if (base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        const auto *event = static_cast<wifi_event_ap_staconnected_t *>(event_data);
+        ESP_LOGI(kTag, "Client connected to SoftAP (AID=%u)", static_cast<unsigned>(event->aid));
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         const auto *event = static_cast<ip_event_got_ip_t *>(event_data);
         esp_timer_stop(reconnect_timer);

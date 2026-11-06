@@ -55,6 +55,7 @@ void power_key_task(void *)
             if (clear_error != ESP_OK) {
                 ESP_LOGE(kTag, "PWR-key IRQ clear failed: %s", esp_err_to_name(clear_error));
             } else if (power_key_short_press_callback != nullptr) {
+                ESP_LOGI(kTag, "PWR button short-press event received from AXP2101");
                 power_key_short_press_callback();
             }
         }

@@ -1,7 +1,9 @@
 #include "display_driver.h"
+#include "activity_state.h"
 #include "system/board_config.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdint>
 #include <cstring>
 #include "esp_check.h"
@@ -13,21 +15,21 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
 namespace {
 constexpr char kTag[] = "display";
-constexpr int kStripeRows = 16;
-constexpr int kIndicatorWidth = 10;
-constexpr int kImageLeft = kIndicatorWidth;
-constexpr int kImageWidth = board::kDisplayWidth - kImageLeft;
-constexpr int kUploadBrightnessPercent = 100;
-constexpr int kIdleBrightnessPercent = 20;
-constexpr uint64_t kUploadBrightnessDurationUs = 30ULL * 1000 * 1000;
+constexpr int kStripeRows = 20;
+constexpr int kIndicatorWidth = 20;
+constexpr int kIndicatorLeft = 10;
+constexpr int kImageLeft = 0;
+constexpr int kImageWidth = board::kDisplayWidth;
 constexpr size_t kFramePixels = board::kDisplayWidth * board::kDisplayHeight;
 constexpr size_t kStripePixels = board::kDisplayWidth * kStripeRows;
 constexpr size_t kIndicatorPixels = kIndicatorWidth * board::kDisplayHeight;
 static_assert(kFramePixels * sizeof(uint16_t) == 460800);
-static_assert(kStripePixels * sizeof(uint16_t) == 15360);
+static_assert(kStripePixels * sizeof(uint16_t) == 19200);
 static_assert(board::kDisplayHeight % kStripeRows == 0);
 static_assert(kIndicatorPixels * sizeof(uint16_t) <= kStripePixels * sizeof(uint16_t));
 
@@ -71,26 +73,47 @@ SemaphoreHandle_t transfer_done = nullptr;
 SemaphoreHandle_t display_mutex = nullptr;
 bool initialized = false;
 int brightness_percent = 20;
-esp_timer_handle_t brightness_timer = nullptr;
+bool panel_on = false;
+bool indicator_visible = false;
+bool indicator_dirty = false;
+unsigned indicator_level = 0;
+unsigned indicator_threshold = CONFIG_APP_WAKE_THRESHOLD;
+QueueHandle_t activity_queue = nullptr;
+QueueHandle_t indicator_queue = nullptr;
+display::ActivityState activity{
+    CONFIG_APP_ACTIVE_BRIGHTNESS,
+    CONFIG_APP_IDLE_TIMEOUT_SECONDS * 1000000ULL,
+    CONFIG_APP_BRIGHTNESS_RAMP_MS * 1000ULL,
+};
+struct IndicatorUpdate {
+    unsigned level;
+    unsigned threshold;
+};
 
-constexpr int next_brightness(int current)
+esp_err_t draw_indicator_locked();
+
+esp_err_t set_panel_locked(bool on)
 {
-    return current == 0 ? 100 : current - 10;
+    if (panel_on == on) return ESP_OK;
+    const esp_err_t error = esp_lcd_panel_disp_on_off(panel, on);
+    if (error == ESP_OK) panel_on = on;
+    return error;
 }
 
-constexpr bool brightness_cycle_is_valid()
+esp_err_t set_brightness_locked(int value)
 {
-    constexpr int expected[] = {10, 0, 100, 90, 80, 70, 60, 50, 40, 30, 20};
-    int current = 20;
-    for (int value : expected) {
-        current = next_brightness(current);
-        if (current != value || current < 0 || current > 100) {
-            return false;
-        }
+    if (brightness_percent == value) return ESP_OK;
+    const esp_err_t error = esp_lcd_panel_co5300_set_brightness(
+        panel, static_cast<uint8_t>(value));
+    if (error == ESP_OK) {
+        brightness_percent = value;
+        ESP_LOGD(kTag, "Ramp %u step: elapsed=%" PRIu64 " ms applied=%d%% register[0x51]=0x%02X panel=%s",
+                 activity.generation,
+                 (static_cast<uint64_t>(esp_timer_get_time()) - activity.started_us) / 1000,
+                 value, display::brightness_register(value), panel_on ? "on" : "off");
     }
-    return true;
+    return error;
 }
-static_assert(brightness_cycle_is_valid());
 
 bool on_transfer_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_data_t *, void *)
 {
@@ -168,27 +191,13 @@ void render_source()
     }
 }
 
-void brightness_timer_callback(void *)
-{
-    if (!initialized) return;
-    xSemaphoreTake(display_mutex, portMAX_DELAY);
-    const esp_err_t error = esp_lcd_panel_co5300_set_brightness(panel, kIdleBrightnessPercent);
-    if (error == ESP_OK) {
-        brightness_percent = kIdleBrightnessPercent;
-        ESP_LOGI(kTag, "Upload brightness timeout: %d%%", brightness_percent);
-    } else {
-        ESP_LOGE(kTag, "Timed brightness reduction failed: %s", esp_err_to_name(error));
-    }
-    xSemaphoreGive(display_mutex);
-}
-
 esp_err_t render_image(const uint16_t *pixels, int width, int height, display::FitMode fit, bool new_upload)
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
     ESP_RETURN_ON_FALSE(pixels != nullptr && width > 0 && height > 0, ESP_ERR_INVALID_ARG, kTag,
                         "Invalid source image");
-    if (new_upload && esp_timer_is_active(brightness_timer)) esp_timer_stop(brightness_timer);
     xSemaphoreTake(display_mutex, portMAX_DELAY);
+    esp_err_t error = ESP_OK;
     auto *replacement = static_cast<uint16_t *>(heap_caps_malloc(
         static_cast<size_t>(width) * height * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (replacement == nullptr) {
@@ -202,20 +211,91 @@ esp_err_t render_image(const uint16_t *pixels, int width, int height, display::F
     source_height = height;
     source_fit = fit;
     render_source();
-    esp_err_t error = flush_framebuffer();
-    if (error == ESP_OK && new_upload) {
-        error = esp_lcd_panel_co5300_set_brightness(panel, kUploadBrightnessPercent);
-        if (error == ESP_OK) brightness_percent = kUploadBrightnessPercent;
-    }
-    if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+    error = flush_framebuffer();
+    indicator_dirty = true;
+    if (error == ESP_OK && !new_upload) error = set_panel_locked(true);
+    if (error == ESP_OK && new_upload) error = display::notify_activity("image upload");
     xSemaphoreGive(display_mutex);
-    if (error == ESP_OK && new_upload) {
-        error = esp_timer_start_once(brightness_timer, kUploadBrightnessDurationUs);
-    }
     return error;
 }
 static_assert(gray_rgb565(0) == 0x0000);
 static_assert(gray_rgb565(255) == 0xFFFF);
+
+void display_control_task(void *)
+{
+    for (;;) {
+        const char *reason = nullptr;
+        bool requested = xQueueReceive(activity_queue, &reason, pdMS_TO_TICKS(20)) == pdTRUE;
+        xSemaphoreTake(display_mutex, portMAX_DELAY);
+        if (!requested) requested = xQueueReceive(activity_queue, &reason, 0) == pdTRUE;
+        const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+        if (requested) {
+            do {
+                const bool was_ramping = activity.ramping;
+                const unsigned previous_generation = activity.generation;
+                const bool replaced = activity.wake(now, brightness_percent, reason);
+                if (was_ramping && replaced) {
+                    ESP_LOGI(kTag, "Ramp %u cancelled at applied=%d%% register[0x51]=0x%02X",
+                             previous_generation, brightness_percent,
+                             display::brightness_register(brightness_percent));
+                }
+                ESP_LOGI(kTag, "Activity: %s; ramp %u %s applied=%d%% target=%d%% duration=%u ms; idle deadline=%" PRIu64 " ms",
+                         reason, activity.generation, replaced ? "requested" : "retained",
+                         brightness_percent, activity.target,
+                         CONFIG_APP_BRIGHTNESS_RAMP_MS, activity.deadline_us / 1000);
+            } while (xQueueReceive(activity_queue, &reason, 0) == pdTRUE);
+        } else if (activity.expire(now, brightness_percent)) {
+            ESP_LOGI(kTag, "Ramp %u requested: idle timeout; applied=%d%% -> 0%% over %u ms",
+                     activity.generation, brightness_percent, CONFIG_APP_BRIGHTNESS_RAMP_MS);
+        }
+        if (activity.ramping) {
+            esp_err_t error = ESP_OK;
+            if (activity.active && !panel_on) {
+                error = set_brightness_locked(0);
+                if (error == ESP_OK) {
+                    activity.start = 0;
+                    error = set_panel_locked(true);
+                    if (error == ESP_OK) {
+                        ESP_LOGI(kTag, "Ramp %u panel on commanded: %s; applied=0%% register[0x51]=0x00",
+                                 activity.generation, activity.reason);
+                    }
+                }
+            }
+            if (error == ESP_OK) error = set_brightness_locked(activity.value(now));
+            if (error == ESP_OK && (activity.finished(now) || activity.start == activity.target)) {
+                if (!activity.active) error = set_panel_locked(false);
+                if (error == ESP_OK) {
+                    activity.ramping = false;
+                    ESP_LOGI(kTag, "Ramp %u complete: %s; elapsed=%" PRIu64 " ms panel=%s applied=%d%% register[0x51]=0x%02X",
+                             activity.generation, activity.reason, (now - activity.started_us) / 1000,
+                             panel_on ? "on" : "off",
+                             brightness_percent, display::brightness_register(brightness_percent));
+                }
+            }
+            if (error != ESP_OK) {
+                activity.ramping = false;
+                ESP_LOGE(kTag, "Ramp %u failed (%s): %s; last applied=%d%% register[0x51]=0x%02X panel=%s; next activity retries",
+                         activity.generation, activity.reason, esp_err_to_name(error),
+                         brightness_percent, display::brightness_register(brightness_percent),
+                         panel_on ? "on" : "off");
+            }
+        }
+        IndicatorUpdate update = {};
+        if (xQueueReceive(indicator_queue, &update, 0) == pdTRUE) {
+            indicator_level = update.level;
+            indicator_threshold = update.threshold;
+            indicator_dirty = true;
+        }
+        if (indicator_visible && indicator_dirty && panel_on) {
+            const esp_err_t error = draw_indicator_locked();
+            indicator_dirty = false;
+            if (error != ESP_OK) {
+                ESP_LOGE(kTag, "Indicator transfer failed: %s", esp_err_to_name(error));
+            }
+        }
+        xSemaphoreGive(display_mutex);
+    }
+}
 }
 
 namespace display {
@@ -232,14 +312,6 @@ esp_err_t initialize()
     ESP_RETURN_ON_FALSE(transfer_done != nullptr, ESP_ERR_NO_MEM, kTag, "Transfer semaphore creation failed");
     display_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(display_mutex != nullptr, ESP_ERR_NO_MEM, kTag, "Display mutex creation failed");
-    esp_timer_create_args_t brightness_timer_config = {};
-    brightness_timer_config.callback = brightness_timer_callback;
-    brightness_timer_config.dispatch_method = ESP_TIMER_TASK;
-    brightness_timer_config.name = "image_brightness";
-    brightness_timer_config.skip_unhandled_events = true;
-    ESP_RETURN_ON_ERROR(esp_timer_create(&brightness_timer_config, &brightness_timer), kTag,
-                        "Timed brightness timer creation failed");
-
     spi_bus_config_t bus_config = {};
     bus_config.sclk_io_num = board::kDisplayClock;
     bus_config.data0_io_num = board::kDisplayData0;
@@ -284,8 +356,18 @@ esp_err_t initialize()
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, false), kTag, "Initial display blanking failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, brightness_percent),
                         kTag, "Brightness setting failed");
+    activity_queue = xQueueCreate(8, sizeof(const char *));
+    indicator_queue = xQueueCreate(1, sizeof(IndicatorUpdate));
+    ESP_RETURN_ON_FALSE(activity_queue != nullptr && indicator_queue != nullptr,
+                        ESP_ERR_NO_MEM, kTag, "Display queue creation failed");
+    activity.deadline_us = static_cast<uint64_t>(esp_timer_get_time()) + activity.idle_us;
     initialized = true;
-    ESP_LOGI(kTag, "CO5300 QSPI initialized; 460800-byte PSRAM framebuffer, 15360-byte internal DMA buffer");
+    ESP_RETURN_ON_FALSE(xTaskCreate(display_control_task, "display-control", 4096, nullptr, 4, nullptr) == pdPASS,
+                        ESP_ERR_NO_MEM, kTag, "Display control task creation failed");
+    ESP_LOGI(kTag, "CO5300 QSPI initialized; 460800-byte PSRAM framebuffer, 19200-byte internal DMA buffer");
+    ESP_LOGI(kTag, "Startup: panel=off applied=%d%% register[0x51]=0x%02X; active=%u%% idle=%u s ramp=%u ms",
+             brightness_percent, brightness_register(brightness_percent), CONFIG_APP_ACTIVE_BRIGHTNESS,
+             CONFIG_APP_IDLE_TIMEOUT_SECONDS, CONFIG_APP_BRIGHTNESS_RAMP_MS);
     return ESP_OK;
 }
 
@@ -314,29 +396,37 @@ esp_err_t show_test_pattern()
 
     // The CO5300 accepts RGB565 MSB first; keep the PSRAM framebuffer in native byte order.
     esp_err_t error = flush_framebuffer();
-    if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+    if (error == ESP_OK) error = set_panel_locked(true);
     xSemaphoreGive(display_mutex);
     return error;
 }
 
-esp_err_t update_noise_indicator(unsigned level_percent, bool over_threshold)
+esp_err_t update_noise_indicator(unsigned level_percent, unsigned threshold_percent)
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
-    level_percent = std::min(level_percent, 100U);
-    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    const IndicatorUpdate update{std::min(level_percent, 100U), std::min(threshold_percent, 100U)};
+    ESP_RETURN_ON_FALSE(xQueueOverwrite(indicator_queue, &update) == pdPASS,
+                        ESP_FAIL, kTag, "Indicator update enqueue failed");
+    return ESP_OK;
+}
+}
 
+namespace {
+esp_err_t draw_indicator_locked()
+{
     constexpr uint16_t kBackground = 0x2104;
     constexpr uint16_t kBelowThreshold = 0x07E0;
     constexpr uint16_t kAboveThreshold = 0xF800;
-    constexpr uint16_t kThresholdMarker = 0xFFE0;
-    const int fill_height = static_cast<int>((static_cast<uint64_t>(level_percent) * board::kDisplayHeight) / 100);
-    const int threshold_y = board::kDisplayHeight - (board::kDisplayHeight * 40 / 100);
-    for (int y = 0; y < board::kDisplayHeight; ++y) {
+    constexpr int kBarTopMargin = 10;
+    constexpr int kBarBottomMargin = 10;
+    constexpr int kBarHeight = board::kDisplayHeight - kBarTopMargin - kBarBottomMargin;
+    const int fill_height = static_cast<int>((static_cast<uint64_t>(indicator_level) * kBarHeight) / 100);
+    const uint16_t fill_color = indicator_level >= indicator_threshold ? kAboveThreshold : kBelowThreshold;
+    for (int y = 0; y < kBarHeight; ++y) {
         uint16_t color = kBackground;
-        if (y >= board::kDisplayHeight - fill_height) {
-            color = over_threshold ? kAboveThreshold : kBelowThreshold;
+        if (y >= kBarHeight - fill_height) {
+            color = fill_color;
         }
-        if (y == threshold_y || y == threshold_y + 1) color = kThresholdMarker;
         const size_t pixel_index = static_cast<size_t>(y) * kIndicatorWidth;
         for (int x = 0; x < kIndicatorWidth; ++x) {
             const size_t byte_index = (pixel_index + x) * 2;
@@ -345,16 +435,18 @@ esp_err_t update_noise_indicator(unsigned level_percent, bool over_threshold)
         }
     }
 
-    const esp_err_t error = esp_lcd_panel_draw_bitmap(panel, 0, 0, kIndicatorWidth,
-                                                      board::kDisplayHeight, transfer_buffer);
+    const esp_err_t error = esp_lcd_panel_draw_bitmap(panel, kIndicatorLeft, kBarTopMargin,
+                                                      kIndicatorLeft + kIndicatorWidth,
+                                                      board::kDisplayHeight - kBarBottomMargin,
+                                                      transfer_buffer);
     if (error == ESP_OK && xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        xSemaphoreGive(display_mutex);
         return ESP_ERR_TIMEOUT;
     }
-    xSemaphoreGive(display_mutex);
     return error;
 }
+}
 
+namespace display {
 esp_err_t show_rgb565(const uint16_t *pixels, int width, int height, FitMode fit)
 {
     return render_image(pixels, width, height, fit, true);
@@ -374,8 +466,9 @@ esp_err_t set_rotation(Rotation rotation)
     if (source_image != nullptr) {
         render_source();
         error = flush_framebuffer();
-        if (error == ESP_OK) error = esp_lcd_panel_disp_on_off(panel, true);
+        indicator_dirty = true;
     }
+    if (error == ESP_OK) error = notify_activity("orientation change");
     xSemaphoreGive(display_mutex);
     return error;
 }
@@ -383,7 +476,6 @@ esp_err_t set_rotation(Rotation rotation)
 esp_err_t clear()
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
-    if (esp_timer_is_active(brightness_timer)) esp_timer_stop(brightness_timer);
     xSemaphoreTake(display_mutex, portMAX_DELAY);
     std::memset(framebuffer, 0, kFramePixels * sizeof(uint16_t));
     if (source_image != nullptr) {
@@ -391,22 +483,52 @@ esp_err_t clear()
         source_image = nullptr;
         source_width = source_height = 0;
     }
-    esp_err_t error = esp_lcd_panel_co5300_set_brightness(panel, kIdleBrightnessPercent);
-    if (error == ESP_OK) brightness_percent = kIdleBrightnessPercent;
-    if (error == ESP_OK) error = flush_framebuffer();
+    esp_err_t error = flush_framebuffer();
+    indicator_dirty = true;
+    if (error == ESP_OK) error = notify_activity("image clear");
     xSemaphoreGive(display_mutex);
     return error;
 }
 
-esp_err_t decrease_brightness()
+esp_err_t notify_activity(const char *reason)
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
-    if (esp_timer_is_active(brightness_timer)) esp_timer_stop(brightness_timer);
+    ESP_RETURN_ON_FALSE(reason != nullptr, ESP_ERR_INVALID_ARG, kTag, "Activity reason is required");
+    ESP_RETURN_ON_FALSE(xQueueSend(activity_queue, &reason, 0) == pdPASS,
+                        ESP_ERR_NO_MEM, kTag, "Activity queue full: %s", reason);
+    return ESP_OK;
+}
+
+esp_err_t set_noise_indicator_visible(bool visible)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
     xSemaphoreTake(display_mutex, portMAX_DELAY);
-    const int next = next_brightness(brightness_percent);
-    const esp_err_t error = esp_lcd_panel_co5300_set_brightness(panel, next);
-    if (error == ESP_OK) brightness_percent = next;
-    ESP_LOGI(kTag, "Brightness: %d%%", brightness_percent);
+    indicator_visible = visible;
+    indicator_dirty = true;
+    if (visible) {
+        ESP_LOGI(kTag, "Sound bar visible; requesting activity wake");
+        const esp_err_t error = notify_activity("sound bar shown");
+        xSemaphoreGive(display_mutex);
+        return error;
+    }
+    for (int y = 0; y < board::kDisplayHeight; ++y) {
+        for (int x = 0; x < kIndicatorWidth; ++x) {
+            const uint16_t pixel = framebuffer[y * board::kDisplayWidth + kIndicatorLeft + x];
+            const size_t byte_index = (static_cast<size_t>(y) * kIndicatorWidth + x) * 2;
+            transfer_buffer[byte_index] = static_cast<uint8_t>(pixel >> 8);
+            transfer_buffer[byte_index + 1] = static_cast<uint8_t>(pixel);
+        }
+    }
+    esp_err_t error = esp_lcd_panel_draw_bitmap(panel, kIndicatorLeft, 0,
+                                                kIndicatorLeft + kIndicatorWidth,
+                                                board::kDisplayHeight, transfer_buffer);
+    if (error == ESP_OK && xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        error = ESP_ERR_TIMEOUT;
+    }
+    if (error == ESP_OK) {
+        ESP_LOGI(kTag, "Sound bar hidden; requesting activity wake");
+        error = notify_activity("sound bar hidden");
+    }
     xSemaphoreGive(display_mutex);
     return error;
 }
