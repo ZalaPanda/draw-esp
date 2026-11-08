@@ -26,6 +26,7 @@ constexpr char kPasswordKey[] = "sta_pass";
 constexpr char kApPasswordKey[] = "ap_pass";
 constexpr char kApSsidPrefix[] = "ESP32-Display-";
 constexpr int kReconnectDelayUs = 5000000;
+constexpr size_t kHostnameMaxLength = 32;
 
 SemaphoreHandle_t network_mutex = nullptr;
 esp_netif_t *ap_netif = nullptr;
@@ -38,6 +39,28 @@ char ap_ssid[33] = {};
 char ap_password[64] = {};
 char sta_ssid[33] = {};
 char sta_password[65] = {};
+
+bool is_valid_hostname(const char *hostname)
+{
+    const size_t length = std::strlen(hostname);
+    if (length == 0 || length > kHostnameMaxLength) {
+        return false;
+    }
+    const auto is_alphanumeric = [](char character) {
+        return (character >= 'a' && character <= 'z') ||
+               (character >= 'A' && character <= 'Z') ||
+               (character >= '0' && character <= '9');
+    };
+    if (!is_alphanumeric(hostname[0]) || !is_alphanumeric(hostname[length - 1])) {
+        return false;
+    }
+    for (size_t i = 1; i + 1 < length; ++i) {
+        if (!is_alphanumeric(hostname[i]) && hostname[i] != '-') {
+            return false;
+        }
+    }
+    return true;
+}
 
 esp_err_t read_nvs_string(nvs_handle_t handle, const char *key, char *value,
                           size_t capacity, bool &present)
@@ -250,6 +273,8 @@ namespace network {
 esp_err_t initialize()
 {
     ESP_RETURN_ON_FALSE(!initialized.load(), ESP_ERR_INVALID_STATE, kTag, "Network already initialized");
+    ESP_RETURN_ON_FALSE(is_valid_hostname(CONFIG_APP_HOSTNAME), ESP_ERR_INVALID_ARG, kTag,
+                        "APP_HOSTNAME must be 1-32 ASCII letters, digits, or hyphens, and start/end with a letter or digit");
     network_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(network_mutex != nullptr, ESP_ERR_NO_MEM, kTag, "Network mutex allocation failed");
 
@@ -271,6 +296,8 @@ esp_err_t initialize()
     ESP_RETURN_ON_FALSE(ap_netif != nullptr, ESP_FAIL, kTag, "SoftAP interface creation failed");
     sta_netif = esp_netif_create_default_wifi_sta();
     ESP_RETURN_ON_FALSE(sta_netif != nullptr, ESP_FAIL, kTag, "STA interface creation failed");
+    ESP_RETURN_ON_ERROR(esp_netif_set_hostname(sta_netif, CONFIG_APP_HOSTNAME), kTag,
+                        "STA hostname setup failed");
 
     wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&wifi_config), kTag, "Wi-Fi initialization failed");
@@ -303,14 +330,16 @@ esp_err_t initialize()
         ESP_RETURN_ON_ERROR(esp_wifi_connect(), kTag, "Initial STA connection request failed");
     }
     ESP_RETURN_ON_ERROR(mdns_init(), kTag, "mDNS initialization failed");
-    ESP_RETURN_ON_ERROR(mdns_hostname_set("esp32-display"), kTag, "mDNS hostname setup failed");
+    ESP_RETURN_ON_ERROR(mdns_hostname_set(CONFIG_APP_HOSTNAME), kTag, "mDNS hostname setup failed");
     ESP_RETURN_ON_ERROR(mdns_instance_name_set("ESP32 Network Image Display"), kTag,
                         "mDNS instance setup failed");
 
     if (sta_configured.load()) {
-        ESP_LOGI(kTag, "STA ready; AP disabled at startup; mDNS=esp32-display.local");
+        ESP_LOGI(kTag, "STA ready; AP disabled at startup; hostname=%s, mDNS=%s.local",
+                 CONFIG_APP_HOSTNAME, CONFIG_APP_HOSTNAME);
     } else {
-        ESP_LOGI(kTag, "AP ready; SSID=%s, IP=192.168.4.1, mDNS=esp32-display.local", ap_ssid);
+        ESP_LOGI(kTag, "AP ready; SSID=%s, IP=192.168.4.1, mDNS=%s.local",
+                 ap_ssid, CONFIG_APP_HOSTNAME);
     }
     ESP_LOGW(kTag, "AP setup password (when AP is enabled): %s", ap_password);
     return ESP_OK;

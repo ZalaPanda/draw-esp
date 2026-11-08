@@ -7,6 +7,14 @@ config APP_AP_PASSWORD
         Optional 8-63 byte WPA2 password. Leave empty to use a password
         derived from this device's factory MAC address.
 
+config APP_HOSTNAME
+    string "Device hostname"
+    default "esp32-display"
+    help
+        Hostname used by the station interface for DHCP and by mDNS.
+        Use 1-32 ASCII letters, digits, or hyphens; the first and last
+        characters must be letters or digits. Do not include ".local".
+
 config APP_STA_SSID
     string "Initial station SSID"
     default ""

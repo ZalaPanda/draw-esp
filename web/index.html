@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ESP32 Display</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/script.js" defer></script>
+</head>
+<body>
+    <h1>ESP32 Image Display</h1>
+    <section>
+        <h2>Status</h2>
+        <pre id="status">Loading…</pre>
+        <button id="refresh-button" type="button">Refresh</button>
+    </section>
+    <section>
+        <h2>Upload image</h2>
+        <input id="image" type="file" accept="image/jpeg,image/png,image/bmp">
+        <img id="preview" alt="Selected image preview" hidden>
+        <label>Fit
+            <select id="fit">
+                <option>contain</option>
+                <option>cover</option>
+                <option>stretch</option>
+            </select>
+        </label>
+        <button id="upload-button" type="button">Upload</button>
+        <button id="clear-button" type="button">Clear display</button>
+    </section>
+    <section>
+        <h2>Wi-Fi</h2>
+        <form id="wifi">
+            <label>SSID <input name="ssid" required maxlength="32"></label>
+            <label>Password <input name="password" type="password" maxlength="64"></label>
+            <button>Save and connect</button>
+        </form>
+        <p id="message"></p>
+    </section>
+</body>
+</html>

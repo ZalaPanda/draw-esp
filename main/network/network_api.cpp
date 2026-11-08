@@ -15,9 +15,17 @@
 #include "mdns.h"
 #include "network_manager.h"
 
+// ESP-IDF EMBED_TXTFILES exposes each null-terminated asset as a linker symbol.
+extern const char index_html_start[] asm("_binary_index_html_start");
+extern const char style_css_start[] asm("_binary_style_css_start");
+extern const char script_js_start[] asm("_binary_script_js_start");
+
 namespace {
 constexpr char kTag[] = "network-api";
 constexpr size_t kMaximumImageUpload = 1024 * 1024;
+constexpr char kContentSecurityPolicy[] =
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
+    "connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 httpd_handle_t server = nullptr;
 
 void log_api_call(const httpd_req_t *request)
@@ -102,10 +110,33 @@ bool get_string(cJSON *root, const char *name, const char *&value)
 esp_err_t handle_root(httpd_req_t *request)
 {
     log_api_call(request);
-    static constexpr char page[] = R"HTML(<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP32 Display</title><style>body{font:16px system-ui;max-width:680px;margin:2rem auto;padding:0 1rem;color:#18202a}section{padding:1rem;margin:1rem 0;border:1px solid #ccd3dc;border-radius:10px}label{display:block;margin:.6rem 0}input,select,button{font:inherit;padding:.5rem}pre{white-space:pre-wrap}</style><h1>ESP32 Image Display</h1><section><h2>Status</h2><pre id="status">Loading…</pre><button onclick="refresh()">Refresh</button></section><section><h2>Upload image</h2><input id="image" type="file" accept="image/jpeg,image/png,image/bmp"><img id="preview" style="display:none;max-width:100%;margin-top:1rem"><label>Fit <select id="fit"><option>contain</option><option>cover</option><option>stretch</option></select></label><button onclick="upload()">Upload</button> <button onclick="clearDisplay()">Clear display</button></section><section><h2>Wi-Fi</h2><form id="wifi"><label>SSID <input name="ssid" required maxlength="32"></label><label>Password <input name="password" type="password" maxlength="64"></label><button>Save and connect</button></form><p id="message"></p></section><script>const msg=x=>document.getElementById('message').textContent=x;async function refresh(){try{let [d,n]=await Promise.all(['/api/device','/api/network'].map(x=>fetch(x).then(r=>r.json())));document.getElementById('status').textContent=JSON.stringify({device:d,network:n},null,2)}catch(e){msg(e.message)}}document.getElementById('image').onchange=e=>{let f=e.target.files[0],p=document.getElementById('preview');if(f){p.src=URL.createObjectURL(f);p.style.display='block'}};async function upload(){let f=document.getElementById('image').files[0];if(!f)return msg('Choose an image first');let r=await fetch('/api/image?fit='+document.getElementById('fit').value,{method:'POST',headers:{'Content-Type':f.type},body:f});msg(await r.text())}async function clearDisplay(){let r=await fetch('/api/image',{method:'DELETE'});msg(await r.text())}document.getElementById('wifi').onsubmit=async e=>{e.preventDefault();let o=Object.fromEntries(new FormData(e.target));let r=await fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});msg(await r.text());refresh()};refresh();setInterval(refresh,10000)</script></html>)HTML";
-    httpd_resp_set_type(request, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    return httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
+    ESP_RETURN_ON_ERROR(httpd_resp_set_type(request, "text/html; charset=utf-8"), kTag,
+                        "HTML content type setup failed");
+    ESP_RETURN_ON_ERROR(httpd_resp_set_hdr(request, "Cache-Control", "no-store"), kTag,
+                        "HTML cache header setup failed");
+    ESP_RETURN_ON_ERROR(httpd_resp_set_hdr(request, "Content-Security-Policy", kContentSecurityPolicy), kTag,
+                        "Content Security Policy setup failed");
+    return httpd_resp_send(request, index_html_start, HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t handle_style(httpd_req_t *request)
+{
+    log_api_call(request);
+    ESP_RETURN_ON_ERROR(httpd_resp_set_type(request, "text/css; charset=utf-8"), kTag,
+                        "Stylesheet content type setup failed");
+    ESP_RETURN_ON_ERROR(httpd_resp_set_hdr(request, "Cache-Control", "no-store"), kTag,
+                        "Stylesheet cache header setup failed");
+    return httpd_resp_send(request, style_css_start, HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t handle_script(httpd_req_t *request)
+{
+    log_api_call(request);
+    ESP_RETURN_ON_ERROR(httpd_resp_set_type(request, "text/javascript; charset=utf-8"), kTag,
+                        "Script content type setup failed");
+    ESP_RETURN_ON_ERROR(httpd_resp_set_hdr(request, "Cache-Control", "no-store"), kTag,
+                        "Script cache header setup failed");
+    return httpd_resp_send(request, script_js_start, HTTPD_RESP_USE_STRLEN);
 }
 
 esp_err_t handle_clear_image(httpd_req_t *request)
@@ -346,6 +377,8 @@ esp_err_t start_http_api()
     config.lru_purge_enable = true;
     ESP_RETURN_ON_ERROR(httpd_start(&server, &config), kTag, "HTTP server startup failed");
     ESP_RETURN_ON_ERROR(register_handler(HTTP_GET, "/", handle_root), kTag, "Root handler registration failed");
+    ESP_RETURN_ON_ERROR(register_handler(HTTP_GET, "/style.css", handle_style), kTag, "Stylesheet handler registration failed");
+    ESP_RETURN_ON_ERROR(register_handler(HTTP_GET, "/script.js", handle_script), kTag, "Script handler registration failed");
     ESP_RETURN_ON_ERROR(register_handler(HTTP_POST, "/api/image", handle_upload_image), kTag, "Image upload handler registration failed");
     ESP_RETURN_ON_ERROR(register_handler(HTTP_DELETE, "/api/image", handle_clear_image), kTag, "Image clear handler registration failed");
     ESP_RETURN_ON_ERROR(register_handler(HTTP_GET, "/api/device", handle_device), kTag, "Device handler registration failed");

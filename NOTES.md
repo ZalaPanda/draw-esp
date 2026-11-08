@@ -23,6 +23,8 @@ espsecure.py
 otatool.py
 parttool.py
 
+PS> idf.py build
+PS> idf.py -p COM4 flash
 PS> idf.py -p COM4 monitor
 press Ctrl+T, then Ctrl+R to reset the board
 ```

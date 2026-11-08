@@ -332,7 +332,11 @@ Do not implement the image editor now.
 
 Do not couple the firmware to a particular frontend framework.
 
-Store static assets in an ESP-IDF-compatible embedded filesystem or embedded resources, choosing the simplest reliable approach.
+Keep the editable static frontend in the project-level `web/` directory. Embed `web/index.html`, `web/style.css`, and `web/script.js` into the firmware at build time and serve them as same-origin resources; do not allocate a filesystem partition for these assets. Editing the source files requires rebuilding and flashing the firmware.
+
+See the ESP-IDF v6.1 [Embedding Binary Data](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/api-guides/build-system.html#embedding-binary-data) documentation for details on embedding files.
+
+The HTTP response for the page should use a restrictive Content Security Policy that blocks inline scripts and styles while allowing same-origin assets and API requests. The local image preview uses a `blob:` URL, so allow that scheme for images only.
 
 ## 10. Architecture and project structure
 
@@ -369,6 +373,10 @@ Suggested structure:
 │   │   └── bmp_decoder.cpp
 │   └── input/
 │       └── power_button.cpp
+├── web/
+│   ├── index.html
+│   ├── style.css
+│   └── script.js
 └── README.md
 ```
 
@@ -438,12 +446,13 @@ The original Stage 1A GPIO18 behavior (KEY3, not BOOT or PWR) changed brightness
 - Wi-Fi startup selects AP or AP+STA mode before applying interface-specific configurations. Runtime mode changes use the same ordering so ESP-IDF has the AP/STA interface enabled before `esp_wifi_set_config()` is called.
 - The default AP password is derived from the full factory Wi-Fi MAC and saved in NVS. It is printed in the USB serial boot log for initial setup. `APP_AP_PASSWORD` in project configuration can supply a custom initial password; `POST /api/ap/password` changes and persists it. The AP password is never included in API responses.
 - `APP_STA_SSID` and `APP_STA_PASSWORD` can seed initial station credentials through `menuconfig`; the firmware stores them in NVS on first boot. `POST /api/wifi` and `DELETE /api/wifi` set or remove credentials at runtime. STA reconnect attempts use a five-second retry timer, and a missing STA network does not stop AP operation.
-- mDNS advertises `esp32-display.local` and the HTTP service. The HTTP server is reachable through AP and STA. Implemented routes include `GET /`, `GET /api/device`, `GET /api/network`, `POST /api/wifi`, `DELETE /api/wifi`, `POST /api/ap/password`, and `POST/DELETE /api/image`.
+- `APP_HOSTNAME` in `menuconfig` configures the station DHCP hostname and mDNS hostname (default `esp32-display`), so the router-visible name and `<hostname>.local` address match. Use 1-32 ASCII letters, digits, or hyphens, with a letter or digit at each end; do not include `.local`. This setting does not change the SoftAP SSID. As with other Kconfig options, defaults populate fresh configurations; for an existing `sdkconfig`, set the value in `menuconfig` or add/update its `CONFIG_APP_HOSTNAME` entry.
+- mDNS advertises `<hostname>.local` and the HTTP service. The HTTP server is reachable through AP and STA. Implemented routes include `GET /`, `GET /api/device`, `GET /api/network`, `POST /api/wifi`, `DELETE /api/wifi`, `POST /api/ap/password`, and `POST/DELETE /api/image`.
 - Credential and AP-password changes use the documented HTTP API over the local AP or LAN. Use a trusted network; the initial API is HTTP and does not provide TLS or user accounts. The setup password is available in the USB serial boot log.
 
 ### Stage 4 implementation: HTTP interface
 
-- `GET /` serves a small embedded HTML page with device/network status, image preview and fit selection, image upload/clear controls, and a station Wi-Fi setup form. It refreshes network status periodically and is served directly from firmware; no filesystem partition or frontend framework is required.
+- `GET /` serves the embedded `web/index.html`; `GET /style.css` and `GET /script.js` serve its separately embedded styles and behavior. The page has a restrictive Content Security Policy with no inline scripts or styles. These resources are compiled into firmware; no filesystem partition or frontend framework is required.
 - `DELETE /api/image` clears the RGB565 framebuffer and transfers the black frame to the display. Display writes and brightness commands share a mutex so HTTP requests cannot overlap the button task's panel operations.
 - The HTTP service registers the image upload and clear routes in addition to the Stage 3 routes. The existing HTTP/no-authentication security limitation remains: configure credentials only on a trusted local network.
 

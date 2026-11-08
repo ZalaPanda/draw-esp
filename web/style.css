@@ -1,0 +1,36 @@
+body {
+    max-width: 680px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    color: #18202a;
+    font: 16px system-ui;
+}
+
+section {
+    margin: 1rem 0;
+    padding: 1rem;
+    border: 1px solid #ccd3dc;
+    border-radius: 10px;
+}
+
+label {
+    display: block;
+    margin: 0.6rem 0;
+}
+
+input,
+select,
+button {
+    padding: 0.5rem;
+    font: inherit;
+}
+
+pre {
+    white-space: pre-wrap;
+}
+
+#preview:not([hidden]) {
+    display: block;
+    max-width: 100%;
+    margin-top: 1rem;
+}
