@@ -7,3 +7,4 @@ dependencies:
   espressif/esp_codec_dev: "1.5.8"
   espressif/mdns: "1.15.0"
   waveshare/qmi8658: "^2.0.2"
+  waveshare/esp_lcd_touch_cst9217: "2.0.0"

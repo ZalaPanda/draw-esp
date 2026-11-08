@@ -1,5 +1,9 @@
 #include "display_driver.h"
 #include "activity_state.h"
+#include "brightness_level.h"
+#include "brightness_settings.h"
+#include "live_brightness.h"
+#include "overlay_geometry.h"
 #include "system/board_config.h"
 
 #include <algorithm>
@@ -21,13 +25,17 @@
 namespace {
 constexpr char kTag[] = "display";
 constexpr int kStripeRows = 20;
-constexpr int kIndicatorWidth = 20;
-constexpr int kIndicatorLeft = 10;
+constexpr int kIndicatorLeft = display::kSoundBarLeft;
+constexpr int kBrightnessIndicatorLeft = display::kBrightnessBarLeft;
+static_assert(display::kOverlaySize == board::kDisplayWidth &&
+              display::kOverlaySize == board::kDisplayHeight);
+static_assert(kBrightnessIndicatorLeft == 450);
+static_assert(kIndicatorLeft + display::kBarWidth <= kBrightnessIndicatorLeft);
 constexpr int kImageLeft = 0;
 constexpr int kImageWidth = board::kDisplayWidth;
 constexpr size_t kFramePixels = board::kDisplayWidth * board::kDisplayHeight;
 constexpr size_t kStripePixels = board::kDisplayWidth * kStripeRows;
-constexpr size_t kIndicatorPixels = kIndicatorWidth * board::kDisplayHeight;
+constexpr size_t kIndicatorPixels = display::kBarWidth * display::kBarHeight;
 static_assert(kFramePixels * sizeof(uint16_t) == 460800);
 static_assert(kStripePixels * sizeof(uint16_t) == 19200);
 static_assert(board::kDisplayHeight % kStripeRows == 0);
@@ -68,14 +76,20 @@ int source_width = 0;
 int source_height = 0;
 display::FitMode source_fit = display::FitMode::contain;
 display::Rotation current_rotation = display::Rotation::deg0;
+unsigned rotation_generation = 0;
 uint8_t *transfer_buffer = nullptr;
 SemaphoreHandle_t transfer_done = nullptr;
 SemaphoreHandle_t display_mutex = nullptr;
 bool initialized = false;
-int brightness_percent = 20;
+int brightness_percent = CONFIG_APP_ACTIVE_BRIGHTNESS;
 bool panel_on = false;
 bool indicator_visible = false;
 bool indicator_dirty = false;
+bool brightness_indicator_visible = false;
+bool brightness_indicator_dirty = false;
+unsigned brightness_indicator_level = CONFIG_APP_ACTIVE_BRIGHTNESS;
+uint64_t brightness_indicator_retry_us = 0;
+display::LiveBrightness live_brightness;
 unsigned indicator_level = 0;
 unsigned indicator_threshold = CONFIG_APP_WAKE_THRESHOLD;
 QueueHandle_t activity_queue = nullptr;
@@ -89,8 +103,15 @@ struct IndicatorUpdate {
     unsigned level;
     unsigned threshold;
 };
+struct DisplayCommand {
+    const char *reason;
+    int brightness_delta = 0;
+    unsigned rotation_generation = 0;
+};
 
 esp_err_t draw_indicator_locked();
+esp_err_t draw_bar_locked(int left, unsigned level, uint16_t fill_color);
+esp_err_t restore_column_locked(int left);
 
 esp_err_t set_panel_locked(bool on)
 {
@@ -129,6 +150,8 @@ constexpr uint16_t gray_rgb565(unsigned gray)
 
 esp_err_t flush_framebuffer()
 {
+    indicator_dirty = true;
+    brightness_indicator_dirty = true;
     for (int y = 0; y < board::kDisplayHeight; y += kStripeRows) {
         const uint16_t *source = framebuffer + y * board::kDisplayWidth;
         for (size_t i = 0; i < kStripePixels; ++i) {
@@ -224,29 +247,62 @@ static_assert(gray_rgb565(255) == 0xFFFF);
 void display_control_task(void *)
 {
     for (;;) {
-        const char *reason = nullptr;
-        bool requested = xQueueReceive(activity_queue, &reason, pdMS_TO_TICKS(20)) == pdTRUE;
+        DisplayCommand command = {};
+        bool requested = xQueueReceive(activity_queue, &command, pdMS_TO_TICKS(20)) == pdTRUE;
         xSemaphoreTake(display_mutex, portMAX_DELAY);
-        if (!requested) requested = xQueueReceive(activity_queue, &reason, 0) == pdTRUE;
-        const uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
+        if (!requested) requested = xQueueReceive(activity_queue, &command, 0) == pdTRUE;
+        uint64_t now = static_cast<uint64_t>(esp_timer_get_time());
         if (requested) {
             do {
+                if (command.brightness_delta != 0) {
+                    if (command.rotation_generation != rotation_generation) {
+                        ESP_LOGI(kTag, "Brightness swipe cancelled: orientation changed");
+                        live_brightness.finish_commit(false);
+                        continue;
+                    }
+                    const unsigned selected = display::adjusted_brightness(
+                        activity.active_brightness, command.brightness_delta);
+                    if (selected != activity.active_brightness) {
+                        const esp_err_t error = display::save_brightness(selected);
+                        if (error != ESP_OK) {
+                            ESP_LOGE(kTag, "Brightness swipe not saved; reverting: %s",
+                                     esp_err_to_name(error));
+                            live_brightness.finish_commit(false);
+                            continue;
+                        }
+                        activity.active_brightness = selected;
+                    }
+                    live_brightness.finish_commit(true);
+                }
                 const bool was_ramping = activity.ramping;
                 const unsigned previous_generation = activity.generation;
-                const bool replaced = activity.wake(now, brightness_percent, reason);
+                now = static_cast<uint64_t>(esp_timer_get_time());
+                const bool replaced = activity.wake(now, brightness_percent, command.reason);
                 if (was_ramping && replaced) {
                     ESP_LOGI(kTag, "Ramp %u cancelled at applied=%d%% register[0x51]=0x%02X",
                              previous_generation, brightness_percent,
                              display::brightness_register(brightness_percent));
                 }
                 ESP_LOGI(kTag, "Activity: %s; ramp %u %s applied=%d%% target=%d%% duration=%u ms; idle deadline=%" PRIu64 " ms",
-                         reason, activity.generation, replaced ? "requested" : "retained",
+                         command.reason, activity.generation, replaced ? "requested" : "retained",
                          brightness_percent, activity.target,
                          CONFIG_APP_BRIGHTNESS_RAMP_MS, activity.deadline_us / 1000);
-            } while (xQueueReceive(activity_queue, &reason, 0) == pdTRUE);
+            } while (xQueueReceive(activity_queue, &command, 0) == pdTRUE);
+            now = static_cast<uint64_t>(esp_timer_get_time());
         } else if (activity.expire(now, brightness_percent)) {
             ESP_LOGI(kTag, "Ramp %u requested: idle timeout; applied=%d%% -> 0%% over %u ms",
                      activity.generation, brightness_percent, CONFIG_APP_BRIGHTNESS_RAMP_MS);
+        }
+        if (panel_on && activity.active) {
+            const unsigned live_target = live_brightness.take_target(activity.active_brightness);
+            if (live_target != 0) {
+                // Swipes set the panel directly; the timed ramp is only for wake and idle fades.
+                activity.ramping = false;
+                const esp_err_t error = set_brightness_locked(static_cast<int>(live_target));
+                if (error != ESP_OK) {
+                    ESP_LOGE(kTag, "Live brightness %u%% failed: %s", live_target, esp_err_to_name(error));
+                }
+            }
         }
         if (activity.ramping) {
             esp_err_t error = ESP_OK;
@@ -293,15 +349,32 @@ void display_control_task(void *)
                 ESP_LOGE(kTag, "Indicator transfer failed: %s", esp_err_to_name(error));
             }
         }
+        if (brightness_indicator_dirty && panel_on && now >= brightness_indicator_retry_us) {
+            const esp_err_t error = brightness_indicator_visible
+                ? draw_bar_locked(kBrightnessIndicatorLeft, brightness_indicator_level, 0xFFE0)
+                : restore_column_locked(kBrightnessIndicatorLeft);
+            if (error != ESP_OK) {
+                brightness_indicator_retry_us = now + 1000000;
+                ESP_LOGE(kTag, "Brightness indicator transfer failed: %s", esp_err_to_name(error));
+            } else {
+                brightness_indicator_dirty = false;
+                brightness_indicator_retry_us = 0;
+            }
+        }
         xSemaphoreGive(display_mutex);
     }
 }
 }
 
 namespace display {
-esp_err_t initialize()
+esp_err_t initialize(unsigned selected_brightness)
 {
     ESP_RETURN_ON_FALSE(framebuffer == nullptr, ESP_ERR_INVALID_STATE, kTag, "Display already initialized");
+    ESP_RETURN_ON_FALSE(valid_brightness(selected_brightness), ESP_ERR_INVALID_ARG, kTag,
+                        "Selected brightness must be 10-100%%");
+    brightness_percent = static_cast<int>(selected_brightness);
+    activity.active_brightness = selected_brightness;
+    activity.start = activity.target = brightness_percent;
     framebuffer = static_cast<uint16_t *>(heap_caps_calloc(kFramePixels, sizeof(uint16_t),
                                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     ESP_RETURN_ON_FALSE(framebuffer != nullptr, ESP_ERR_NO_MEM, kTag, "PSRAM framebuffer allocation failed");
@@ -356,7 +429,7 @@ esp_err_t initialize()
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, false), kTag, "Initial display blanking failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_co5300_set_brightness(panel, brightness_percent),
                         kTag, "Brightness setting failed");
-    activity_queue = xQueueCreate(8, sizeof(const char *));
+    activity_queue = xQueueCreate(8, sizeof(DisplayCommand));
     indicator_queue = xQueueCreate(1, sizeof(IndicatorUpdate));
     ESP_RETURN_ON_FALSE(activity_queue != nullptr && indicator_queue != nullptr,
                         ESP_ERR_NO_MEM, kTag, "Display queue creation failed");
@@ -366,7 +439,7 @@ esp_err_t initialize()
                         ESP_ERR_NO_MEM, kTag, "Display control task creation failed");
     ESP_LOGI(kTag, "CO5300 QSPI initialized; 460800-byte PSRAM framebuffer, 19200-byte internal DMA buffer");
     ESP_LOGI(kTag, "Startup: panel=off applied=%d%% register[0x51]=0x%02X; active=%u%% idle=%u s ramp=%u ms",
-             brightness_percent, brightness_register(brightness_percent), CONFIG_APP_ACTIVE_BRIGHTNESS,
+             brightness_percent, brightness_register(brightness_percent), activity.active_brightness,
              CONFIG_APP_IDLE_TIMEOUT_SECONDS, CONFIG_APP_BRIGHTNESS_RAMP_MS);
     return ESP_OK;
 }
@@ -414,35 +487,53 @@ esp_err_t update_noise_indicator(unsigned level_percent, unsigned threshold_perc
 namespace {
 esp_err_t draw_indicator_locked()
 {
-    constexpr uint16_t kBackground = 0x2104;
-    constexpr uint16_t kBelowThreshold = 0x07E0;
-    constexpr uint16_t kAboveThreshold = 0xF800;
-    constexpr int kBarTopMargin = 10;
-    constexpr int kBarBottomMargin = 10;
-    constexpr int kBarHeight = board::kDisplayHeight - kBarTopMargin - kBarBottomMargin;
-    const int fill_height = static_cast<int>((static_cast<uint64_t>(indicator_level) * kBarHeight) / 100);
-    const uint16_t fill_color = indicator_level >= indicator_threshold ? kAboveThreshold : kBelowThreshold;
-    for (int y = 0; y < kBarHeight; ++y) {
-        uint16_t color = kBackground;
-        if (y >= kBarHeight - fill_height) {
-            color = fill_color;
-        }
-        const size_t pixel_index = static_cast<size_t>(y) * kIndicatorWidth;
-        for (int x = 0; x < kIndicatorWidth; ++x) {
-            const size_t byte_index = (pixel_index + x) * 2;
-            transfer_buffer[byte_index] = static_cast<uint8_t>(color >> 8);
-            transfer_buffer[byte_index + 1] = static_cast<uint8_t>(color);
-        }
-    }
+    const uint16_t color = indicator_level >= indicator_threshold ? 0xF800 : 0x07E0;
+    return draw_bar_locked(kIndicatorLeft, indicator_level, color);
+}
 
-    const esp_err_t error = esp_lcd_panel_draw_bitmap(panel, kIndicatorLeft, kBarTopMargin,
-                                                      kIndicatorLeft + kIndicatorWidth,
-                                                      board::kDisplayHeight - kBarBottomMargin,
+esp_err_t transfer_rect_locked(const display::OverlayRect &rect)
+{
+    const esp_err_t error = esp_lcd_panel_draw_bitmap(panel, rect.x0, rect.y0, rect.x1, rect.y1,
                                                       transfer_buffer);
     if (error == ESP_OK && xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
     return error;
+}
+
+// Bars are laid out in the viewer's frame, so they follow the image rotation.
+esp_err_t draw_bar_locked(int left, unsigned level, uint16_t fill_color)
+{
+    constexpr uint16_t kBackground = 0x2104;
+    static_assert(display::kBarHeight == 460);
+    static_assert(display::bar_filled_rows(0) == 0 && display::bar_filled_rows(10) == 46 &&
+                  display::bar_filled_rows(50) == 230 && display::bar_filled_rows(100) == 460);
+    const unsigned rotation = static_cast<unsigned>(current_rotation);
+    const display::OverlayRect rect = display::bar_rect(left, rotation);
+    size_t byte_index = 0;
+    for (int y = rect.y0; y < rect.y1; ++y) {
+        for (int x = rect.x0; x < rect.x1; ++x) {
+            const uint16_t color = display::bar_pixel_filled({x, y}, rotation, level)
+                ? fill_color : kBackground;
+            transfer_buffer[byte_index++] = static_cast<uint8_t>(color >> 8);
+            transfer_buffer[byte_index++] = static_cast<uint8_t>(color);
+        }
+    }
+    return transfer_rect_locked(rect);
+}
+
+esp_err_t restore_column_locked(int left)
+{
+    const display::OverlayRect rect = display::bar_rect(left, static_cast<unsigned>(current_rotation));
+    size_t byte_index = 0;
+    for (int y = rect.y0; y < rect.y1; ++y) {
+        for (int x = rect.x0; x < rect.x1; ++x) {
+            const uint16_t pixel = framebuffer[y * board::kDisplayWidth + x];
+            transfer_buffer[byte_index++] = static_cast<uint8_t>(pixel >> 8);
+            transfer_buffer[byte_index++] = static_cast<uint8_t>(pixel);
+        }
+    }
+    return transfer_rect_locked(rect);
 }
 }
 
@@ -461,12 +552,19 @@ esp_err_t set_rotation(Rotation rotation)
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
     xSemaphoreTake(display_mutex, portMAX_DELAY);
-    current_rotation = rotation;
+    const bool rotated = current_rotation != rotation;
+    if (rotated) {
+        current_rotation = rotation;
+        ++rotation_generation;
+    }
     esp_err_t error = ESP_OK;
     if (source_image != nullptr) {
         render_source();
         error = flush_framebuffer();
         indicator_dirty = true;
+    } else if (rotated) {
+        // Overlays move with the rotation; erase their old physical position.
+        error = flush_framebuffer();
     }
     if (error == ESP_OK) error = notify_activity("orientation change");
     xSemaphoreGive(display_mutex);
@@ -494,8 +592,63 @@ esp_err_t notify_activity(const char *reason)
 {
     ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
     ESP_RETURN_ON_FALSE(reason != nullptr, ESP_ERR_INVALID_ARG, kTag, "Activity reason is required");
-    ESP_RETURN_ON_FALSE(xQueueSend(activity_queue, &reason, 0) == pdPASS,
+    const DisplayCommand command{reason};
+    ESP_RETURN_ON_FALSE(xQueueSend(activity_queue, &command, 0) == pdPASS,
                         ESP_ERR_NO_MEM, kTag, "Activity queue full: %s", reason);
+    return ESP_OK;
+}
+
+esp_err_t read_touch_state(TouchState &state)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    state = {panel_on, current_rotation, rotation_generation};
+    xSemaphoreGive(display_mutex);
+    return ESP_OK;
+}
+
+esp_err_t begin_touch(TouchState &state)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    state = {panel_on, current_rotation, rotation_generation};
+    const esp_err_t error = notify_activity("touch");
+    xSemaphoreGive(display_mutex);
+    return error;
+}
+
+esp_err_t adjust_brightness(int delta, unsigned expected_rotation_generation)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    ESP_RETURN_ON_FALSE(delta != 0 && delta >= -100 && delta <= 100, ESP_ERR_INVALID_ARG, kTag,
+                        "Brightness swipe delta must be between -100 and 100 and nonzero");
+    const DisplayCommand command{"brightness swipe", delta, expected_rotation_generation};
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    live_brightness.request_commit(activity.active_brightness, delta);
+    const bool queued = xQueueSend(activity_queue, &command, 0) == pdPASS;
+    if (!queued) live_brightness.finish_commit(false);
+    xSemaphoreGive(display_mutex);
+    ESP_RETURN_ON_FALSE(queued, ESP_ERR_NO_MEM, kTag, "Brightness adjustment queue full");
+    return ESP_OK;
+}
+
+esp_err_t update_brightness_preview(bool adjusting, int preview_delta,
+                                    unsigned expected_rotation_generation)
+{
+    ESP_RETURN_ON_FALSE(initialized, ESP_ERR_INVALID_STATE, kTag, "Display is not initialized");
+    ESP_RETURN_ON_FALSE(preview_delta >= -100 && preview_delta <= 100, ESP_ERR_INVALID_ARG,
+                        kTag, "Invalid brightness preview delta");
+    xSemaphoreTake(display_mutex, portMAX_DELAY);
+    adjusting = adjusting && expected_rotation_generation == rotation_generation;
+    live_brightness.preview(adjusting, activity.active_brightness, preview_delta);
+    const unsigned level = live_brightness.level;
+    if (adjusting != brightness_indicator_visible ||
+        (adjusting && level != brightness_indicator_level)) {
+        brightness_indicator_visible = adjusting;
+        brightness_indicator_level = level;
+        brightness_indicator_dirty = true;
+    }
+    xSemaphoreGive(display_mutex);
     return ESP_OK;
 }
 
@@ -511,20 +664,7 @@ esp_err_t set_noise_indicator_visible(bool visible)
         xSemaphoreGive(display_mutex);
         return error;
     }
-    for (int y = 0; y < board::kDisplayHeight; ++y) {
-        for (int x = 0; x < kIndicatorWidth; ++x) {
-            const uint16_t pixel = framebuffer[y * board::kDisplayWidth + kIndicatorLeft + x];
-            const size_t byte_index = (static_cast<size_t>(y) * kIndicatorWidth + x) * 2;
-            transfer_buffer[byte_index] = static_cast<uint8_t>(pixel >> 8);
-            transfer_buffer[byte_index + 1] = static_cast<uint8_t>(pixel);
-        }
-    }
-    esp_err_t error = esp_lcd_panel_draw_bitmap(panel, kIndicatorLeft, 0,
-                                                kIndicatorLeft + kIndicatorWidth,
-                                                board::kDisplayHeight, transfer_buffer);
-    if (error == ESP_OK && xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        error = ESP_ERR_TIMEOUT;
-    }
+    esp_err_t error = restore_column_locked(kIndicatorLeft);
     if (error == ESP_OK) {
         ESP_LOGI(kTag, "Sound bar hidden; requesting activity wake");
         error = notify_activity("sound bar hidden");

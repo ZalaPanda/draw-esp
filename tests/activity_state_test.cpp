@@ -74,6 +74,41 @@ static_assert(test_ramps());
 static_assert(test_deadline_and_interruption());
 static_assert(test_activity_sources());
 static_assert(test_repeated_activity_does_not_restart_ramp());
+constexpr bool test_selected_brightness_retargets()
+{
+    display::ActivityState state{80, 30000000, 400000};
+    state.wake(1000000, 0, "touch");
+    const int halfway = state.value(1200000);
+    if (halfway != 40) return false;
+    state.active_brightness = 30;
+    if (!state.wake(1200000, halfway, "brightness swipe")) return false;
+    if (state.target != 30 || state.value(1200000) != 40 ||
+        state.value(1400000) != 35 || state.value(1600000) != 30) return false;
+    if (state.wake(1400000, 35, "sound")) return false;
+    if (state.deadline_us != 31400000) return false;
+    if (!state.expire(31400000, 30)) return false;
+    const int fading = state.value(31600000);
+    if (fading != 15) return false;
+    state.active_brightness = 10;
+    if (!state.wake(31600000, fading, "touch")) return false;
+    if (state.value(31600000) != 15 || state.value(32000000) != 10) return false;
+    return state.expire(61600000, 10) && state.value(62000000) == 0;
+}
+
+constexpr bool test_restored_targets()
+{
+    for (unsigned selected = 10; selected <= 100; selected += 10) {
+        display::ActivityState state{selected, 30000000, 400000};
+        state.start = state.target = static_cast<int>(selected);
+        if (state.value(0) != static_cast<int>(selected)) return false;
+        if (!state.wake(1000000, 0, "touch")) return false;
+        if (state.value(1400000) != static_cast<int>(selected)) return false;
+    }
+    return true;
+}
+
+static_assert(test_selected_brightness_retargets());
+static_assert(test_restored_targets());
 static_assert(display::ramp_value(80, 0, 0, 0) == 0);
 static_assert(display::ramp_value(80, 0, 1, 1) == 0);
 static_assert(display::ramp_value(80, 0, 200000, 400000) == 40);

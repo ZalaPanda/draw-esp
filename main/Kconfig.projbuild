@@ -28,16 +28,17 @@ config APP_STA_PASSWORD
         Password for the initial station network. Saved to NVS on first boot.
 
 config APP_ACTIVE_BRIGHTNESS
-    int "Active display brightness (%)"
-    range 1 100
+    int "First-use active display brightness (%)"
+    range 10 100
     default 80
     help
-        Brightness the display ramps to on activity: a new image upload,
+        Default selected brightness when no saved touch setting exists.
+        Touch swipes change and save this selection between 10% and 100%.
+        Used at startup and on activity: a new image upload,
         image clear, orientation change, GPIO18 sound-bar toggle, or
         qualified sound events. Sent to the CO5300 as command 0x51 with
-        raw value percent * 255 / 100 (80% = 0xCC). After boot or image
-        restore the display stays at 20% until the first activity or idle
-        timeout.
+        raw value percent * 255 / 100 (80% = 0xCC). Idle still fades to
+        0% and turns the panel off.
 
 config APP_IDLE_TIMEOUT_SECONDS
     int "Display idle timeout (seconds)"

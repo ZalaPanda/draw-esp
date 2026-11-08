@@ -2,6 +2,18 @@
 
 ![Real-life-esp](photo-esp.jpg) ![Real-life-app](photo-app.jpg)
 
+## Implemented features ✨
+
+A tiny Wi-Fi display with a pixel-art studio built right in:
+
+- **Make pixel art on the device:** Draw in the built-in web editor with five grid sizes, classic palettes, image import, PNG export, and browser-saved drafts.
+- **Set it up from your phone/laptop:** Connect over Wi-Fi AP or STA, configure network credentials, check device status, and send or clear artwork.
+- **Display your images your way:** Upload JPEG, PNG, or BMP images and choose contain, cover, or stretch fitting.
+- **Follow the device orientation:** The onboard motion sensor detects rotation and keeps the image and on-screen indicators oriented for viewing.
+- **Pick up where you left off:** The most recently displayed image is saved across restarts with crash-safe updates.
+- **Wake to sound, rest when quiet:** Onboard microphones drive a sound-level indicator and wake the screen after two qualifying sound events; the display fades off after inactivity.
+- **Swipe for the brightness you want:** Adjust brightness with a touch gesture, preview it live, and have your preferred awake level saved.
+
 ## 1. Project goal
 
 Develop custom firmware for the Waveshare ESP32-S3-Touch-AMOLED-2.16 development board.
@@ -148,11 +160,21 @@ Responsibilities:
 - Manage framebuffer memory.
 - Support RGB565 as the internal rendering format.
 - Display images at 480×480.
-- Fit images across the full 480×480 area. Stage 8 optionally overlays a 20-pixel-wide noise indicator at x=10–29 without changing image placement.
+- Fit images across the full 480×480 area. Stage 8 optionally overlays a 20-pixel-wide noise indicator at x=10–29 (viewer's left; it follows image rotation since Stage 9) without changing image placement.
 - Clear the display.
 - Handle image updates without unnecessary flickering.
 
 Use the available 8 MB PSRAM for large buffers when appropriate.
+
+Touch swipes select the awake brightness: up increases and down decreases,
+clamped to 10%-100%. A 20-pixel tolerance rejects small movements; a qualifying
+swipe scales by its full vertical distance, with 480 pixels equal to 100
+percentage points. Directions follow image rotation. The panel brightness follows
+the finger live during the swipe (no ramp), while a right-side bar shows the level.
+The selected level is saved in NVS on release and restored at startup and on every activity
+wake; the first-use default is 80%. Existing idle fade-to-0% and panel-off
+behavior remains independent of this minimum. The first contact while the
+panel is off only wakes it; release before making a brightness swipe.
 
 A full 480×480 RGB565 framebuffer requires 460,800 bytes.
 
@@ -480,7 +502,7 @@ The original Stage 1A GPIO18 behavior (KEY3, not BOOT or PWR) changed brightness
 20 -> 10 -> 0 -> 100 -> 90 -> 80 -> 70 -> 60 -> 50 -> 40 -> 30 -> 20 -> ...
 ```
 
-- Brightness is a percentage from 0 to 100, initially 20 after every reboot. The brightness setting itself is not persisted to flash.
+- Historically, brightness was a percentage from 0 to 100, initially 20 after every reboot, and was not persisted. Stage 8 replaced the cycle; Stage 9 adds persistent touch-selected awake brightness.
 - `main/input/brightness_button.cpp` configures the verified active-low GPIO as an input and samples it every 10 ms in a dedicated FreeRTOS task. Press and release each require 50 ms of stable input. Holding the button does not repeat. A button held when the task starts must first be released before it can trigger a step.
 - `main/input/button_debouncer.h` isolates the debounce state machine. Brightness changes occur in task context, not an ISR, and `app_main` returns normally. The existing FreeRTOS 100 Hz tick rate needs no configuration changes.
 - `display::decrease_brightness()` is the single owner of brightness state; it sends the CO5300 brightness command and updates the tracked value only on success. Failures are logged; release and press again to retry. There are no other runtime display writers at this stage; future network/display work must serialize access before introducing concurrent writers.
@@ -520,11 +542,11 @@ The original Stage 1A GPIO18 behavior (KEY3, not BOOT or PWR) changed brightness
 - `main/input/orientation.cpp` initializes the QMI8658 at address `0x6B` on the PMIC module's existing 400 kHz GPIO14/15 I²C bus. It samples accelerometer data every 100 ms and accepts a new orientation after eight consecutive samples with at least 0.70 g on a dominant in-plane axis. Face-up/down and diagonal positions retain the last orientation, providing hysteresis against boundary flicker. The accelerometer runs at 125 Hz in ±4 g range; the gyroscope is left disabled. The managed driver 2.0.2 header declares `qmi8658_read_accel_mps2()`, but that version does not define it, so the firmware uses the implemented `qmi8658_read_accel()` with m/s² units enabled.
 - Orientation is applied in software before fitting, so all three fit modes rotate with the display while panel initialization stays fixed. The mapping assumes the sensor X/Y axes lie in the display plane: +Y is 0°, −X is 90°, −Y is 180°, and +X is 270°. Confirm the physical mapping and stability on the board; sensor-axis mounting and orientation cannot be confirmed by a host build.
 
-The Stage 1A 11-step brightness-cycle assertions were removed with that cycle in Stage 8. `tests\activity_state_test.cpp` covers brightness ramps, `0x51` raw values, idle deadlines, and activity sources; `tests\sound_events_test.cpp` covers sound qualification, re-arm, event windows, baseline protection, and configuration validity. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
+The Stage 1A 11-step brightness-cycle assertions were removed with that cycle in Stage 8. `tests\activity_state_test.cpp` covers brightness ramps, `0x51` raw values, idle deadlines, activity sources, and retargeting after touch adjustments; `tests\touch_gesture_test.cpp` covers raw reports, rotation-aware gestures, cancellation, and brightness bounds. `tests\sound_events_test.cpp` covers sound qualification, re-arm, event windows, baseline protection, and configuration validity. The standalone compile-time debounce tests cover the exact debounce threshold, bounce on press/release, short presses, holding, repeated presses, a startup-held button and tick-counter wraparound:
 
 ```powershell
 # After loading the ESP-IDF profile:
-xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp tests\activity_state_test.cpp tests\sound_events_test.cpp
+xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp tests\activity_state_test.cpp tests\sound_events_test.cpp tests\touch_gesture_test.cpp tests\live_brightness_test.cpp tests\overlay_geometry_test.cpp
 if ($LASTEXITCODE -ne 0) { throw "Logic regression tests failed" }
 python "$env:IDF_PATH\tools\idf.py" build
 if ($LASTEXITCODE -ne 0) { throw "Firmware build failed" }
@@ -653,7 +675,7 @@ Stage 7 remains the sound-level measurement and indicator foundation. Stage 8 ad
 
 - `partitions.csv` provides two alternating raw flash slots, each large enough for the maximum 1 MiB compressed upload plus metadata. The slots are separate from NVS and the application partition.
 - `main/image/image_store.cpp` stores the original compressed JPEG/PNG/BMP bytes, selected fit mode, generation, and CRC32. Each update is written to the inactive slot and commits its header last, so a power loss during an upload leaves the previous image recoverable. `DELETE /api/image` writes a clear marker so the old slot is not restored after reboot.
-- At startup, the firmware validates the newest saved record, decodes it, and renders it at the normal 20% startup brightness. If there is no saved image or the saved data is invalid, it displays the existing test pattern.
+- At startup, the firmware validates the newest saved record, decodes it, and renders it at the selected startup brightness (historically 20%; Stage 9 restores the saved touch level, defaulting to 80%). If there is no saved image or the saved data is invalid, it displays the existing test pattern.
 - Historically, uploads displayed at 100% for 30 seconds before returning to 20%, and GPIO18 resumed manual brightness control. Stage 8 replaces this with activity-controlled 80% brightness and fade-to-off.
 - Clearing still commits a persistent clear marker. In Stage 8 it also wakes the display and restarts the activity timer instead of setting 20%.
 - Flashing the firmware with the custom partition table is required for this feature. Do not use a full-chip erase; preserve the factory backup. The new storage behavior and recovery after interrupted writes require board testing.
@@ -672,12 +694,12 @@ Stage 7 software validation (2026-11-05): ESP-IDF 6.1 ESP32-S3 build passed with
 ### Stage 8 implementation — sound activity, idle panel, and indicator visibility
 
 - The sound monitor maps the relative RMS level to the existing 0–100 indicator scale. A candidate event must remain at or above the configurable wake threshold for the configured qualification period. Once qualified, it cannot count again until the level remains below the re-arm threshold for its configured duration. The default is two events within 10 seconds.
-- Two qualified events, a successful image upload/clear, a stable orientation change, or a GPIO18 bar toggle restart the activity timer and request the active brightness. One persistent display-control task owns runtime panel on/off, idle deadlines, and ramp progression; raw redraws never independently power it on. The task runs even if microphone capture fails. Startup/restore remains 20% until activity or idle timeout.
+- Two qualified events, a successful image upload/clear, a stable orientation change, or a GPIO18 bar toggle restart the activity timer and request the active brightness. One persistent display-control task owns runtime panel on/off, idle deadlines, and ramp progression; raw redraws never independently power it on. The task runs even if microphone capture fails. Startup/restore was initially 20%; Stage 9 uses the persisted selected level at startup and on all wakes, and adds touch activity.
 - Ramps interpolate with signed arithmetic and monotonic elapsed time. Activity interrupts fade-out from the last successfully applied value; activity during fade-in only renews the deadline without restarting/starving the ramp. An idle panel starts at 0% before on, and off is commanded only after a successful 0% write. Queue/command errors are logged explicitly; a failed transition stops and the next activity retries rather than falsely reporting completion.
 - ES7210 setup enables initialized RX before codec open, matching the codec's disable/reconfigure/enable sequence and avoiding the initial unenabled-channel error. A complete I2S window is read successfully before capture is declared ready. The codec's record-only "No paired data" INFO message is normal; it refers to absent playback, not missing microphones.
 - Capture uses checked native I2S reads, including exact byte counts. Read errors, queue overflow, and excessive processing gaps reset qualification/re-arm continuity. Durations count observed 20 ms audio windows (100 ms is exactly five windows); they never count missing wall time as observed sound. Event timestamps use a rolling window, including event counts above two. Invalid threshold ordering or infeasible event timings fail at compile time.
 - Indicator measurements are posted through a one-item overwrite queue. The display task renders the latest value without making capture wait on panel transfers. Indicator state and visibility changes are synchronized with the existing display mutex.
-- This stage supersedes Stage 6's fixed 100%-for-30-seconds upload brightness and GPIO18 manual brightness cycle. The default active brightness is now 80%, with a configurable 30-second idle timeout.
+- This stage supersedes Stage 6's fixed 100%-for-30-seconds upload brightness and GPIO18 manual brightness cycle. The default active brightness is 80%, with a configurable 30-second idle timeout. Stage 9 makes the active level touch-adjustable and persistent without changing idle-off behavior.
 - GPIO18 toggles indicator visibility and requests activity wake. The indicator starts hidden, overlays x=10–29 and y=10–469 (10-pixel margins at the top and bottom), and uses green below the wake threshold and red at or above it. Hiding the bar redraws its full column from the image framebuffer to remove all bar pixels. Image fitting remains full-screen and unchanged when visibility toggles.
 - `main/Kconfig.projbuild` exposes active brightness, idle timeout, ramp duration, wake threshold, qualification duration, re-arm threshold/duration, required event count, and event window as build-time options.
 - Redundant brightness writes are skipped. The CO5300 SPI driver's per-step INFO messages are filtered to WARN, and the ESP-IDF `spi_master` tag is capped at INFO because it logs one DEBUG line per bus lock/release; with the sound bar redrawn every 20 ms that flood exceeds the 115200-baud console. Application INFO logs report activity reason/deadline, ramp request/cancellation/completion/failure, commanded panel state, and applied brightness percent/raw value. DEBUG logs report every changed ramp value. Qualified events, rejected candidates (sound that reached the wake threshold but dropped below it before the qualification time), partial-window expiration, re-arm, baseline initialization, baseline-hold expiry, and capture-health changes are visible at INFO/WARN/ERROR. The former once-per-second DEBUG RMS/baseline line was removed by user request.
@@ -691,6 +713,158 @@ Stage 8 software validation (2026-11-05): ESP-IDF 6.1 ESP32-S3 build passes afte
 Stage 8 repair findings: unsigned interpolation drove downward fades to 100%; a stale timestamp subtraction scheduled sleep immediately after sound wake; orientation/clear independently turned the panel back on without renewing the idle timer; per-request ramp tasks and unsynchronized activity state allowed races; baseline updates/read gaps undermined continuous-event timing; event expiration and applied brightness were not logged; codec setup disabled an RX channel that had never been enabled. The supplied log already contained `2/2`; isolated `1/2` entries more than 10 seconds apart correctly expired but lacked reset diagnostics. Regression tests cover every brightness start/target pair, monotonic bounds/endpoints, interrupted ramps, activity deadlines/sources, qualification/re-arm boundaries, capture discontinuities, rolling-window expiry, baseline protection, and configuration validity. Hardware validation and final sensitivity tuning remain pending; no flashing is implied by a successful build.
 
 Stage 8 repair software validation (2026-11-05): target-compiler C++17 regression assertions and the ESP-IDF 6.1 build pass with 60/40 sound thresholds. The ISR overflow counter uses ESP-IDF critical sections rather than assuming lock-free C++ atomics. Build completion is checked through the ESP-IDF Python entry point and process exit code. The firmware image is 0x11b220 bytes, leaving 56% of the 2.5 MiB application partition free; hardware tests, including actual luminance and wake sensitivity, remain pending an approved flash.
+
+### Stage 9 — Touch-selected persistent brightness
+
+- The documented CST9220 uses the official board BSP's standalone
+  `waveshare/esp_lcd_touch_cst9217` **2.0.0** driver for initialization, at I2C
+  address `0x5A`, on the existing 400 kHz SDA15/SCL14 bus. Reset is GPIO40,
+  interrupt is GPIO11, both active-low. No BSP/LVGL dependency is introduced.
+- `main/input/touch_brightness.cpp` polls every 20 ms, using bounded 100 ms I2C
+  transactions. The vendor coordinate API clamps every report to one point,
+  so the application reads the same verified 10-byte `0xD000` report through
+  native panel-I/O APIs and preserves the raw point count to reject multi-touch.
+  It checks the `0xAB` acknowledgement, contact status, and 480x480 bounds.
+  The BSP's swap-X/Y and mirror-Y mapping is normalized to zero-based pixel
+  coordinates before applying the inverse software image rotation.
+- A predominantly vertical swipe of at least 20 pixels changes the
+  selected brightness proportionally: up increases, down decreases, clamped at
+  10% and 100% without wrapping. Board testing showed the original swipe sign
+  was reversed; the direction now follows the observed physical upward movement
+  (increasing mapped Y at rotation 0), retaining rotation-aware controls.
+  The full start-to-end vertical distance is scaled by 100/480 and rounded to
+  the nearest whole percentage point; the 20-pixel tolerance (reduced from 40
+  pixels after board testing) is a detection gate, not a distance subtracted
+  from qualifying swipes. A 20-pixel swipe changes 4 points; a 240-pixel upward
+  swipe adds 50 points, so two such swipes take 10% to 100%. A 479-pixel
+  edge-to-edge movement rounds to 100 points.
+  The swipe is committed after three consecutive released samples and saved.
+  Taps, horizontal/diagonal swipes without a
+  dominant vertical displacement, and stationary holds do not adjust brightness.
+- Live adjustment: during a valid single-finger swipe the real panel brightness
+  (`0x51`) is set immediately to the selected level plus the current swipe
+  delta, clamped to 10%-100%, on every 20 ms touch sample. No ramp or smoothing
+  is used while touching; an in-flight wake ramp is stopped, and redundant
+  `0x51` writes are skipped. `main/display/live_brightness.h` holds the live
+  level through the release debounce until the display task has persisted it,
+  so release does not flicker back to the old level. NVS is written only on
+  release. Cancellation (multi-touch, rotation change, read failure, sample
+  gap) or a failed save instantly restores the saved level. Wake and idle
+  fades still use the configured ramp.
+- A yellow brightness bar overlays the right side at x=450-469, y=10-469,
+  matching the left sound bar's 20-pixel width and 10-pixel margins, for every
+  adjusting contact, independent of the left sound bar's visibility. Its
+  bottom-up fill shows the live level. Below the swipe tolerance it shows the
+  selected level. Wake-only contacts show no bar and change nothing.
+  The bar hides as soon as the release is confirmed (three released samples,
+  about 60 ms) or on cancellation; the latest image pixels are restored without
+  changing the framebuffer, image fit, or left sound bar visibility. An earlier
+  revision only redrew the bar inside the sound-bar redraw branch, so it was
+  visible only while the sound bar was shown; the two overlays are now drawn
+  independently.
+- Rotation-aware overlays: both bars are laid out in the viewer's frame (the
+  same software rotation used for the image and touch), so the sound bar is
+  always on the viewer's left, the brightness bar on the viewer's right, and both
+  fill upward from the viewer's bottom. The physical coordinates above apply to
+  rotation 0; at 90°/270° the bars become 460x20 horizontal strips along a
+  physical top/bottom edge. `main/display/overlay_geometry.h` maps viewer
+  rectangles to physical panel rectangles and decides each pixel's fill; drawing
+  and hiding transfer only that rectangle. A rotation change always reflushes the
+  framebuffer (even without an uploaded image) so bars at the old position are
+  erased, then visible bars are redrawn at the new position.
+  The display task serializes both overlays and live brightness with image
+  redraws and panel ramps, redraws feedback after uploads/clear/rotation, and
+  retries failed feedback transfers once per second with explicit errors. Touch
+  updates do not transfer pixels or write flash themselves.
+- Touch wakes/renews the activity timer; a held contact renews it once per second.
+  A contact begun while the panel is off is wake-only until release. Startup-held
+  touches, multi-touch, input errors, sample gaps over 200 ms, and rotation changes
+  cancel adjustment until a stable release. Rotation is snapshotted at contact
+  start and its generation is rechecked when the display task accepts the swipe.
+- `main/display/brightness_settings.cpp` initializes NVS once before display and
+  network startup. It uses namespace `display`, key `brightness`, as an unsigned
+  byte. An absent key uses `APP_ACTIVE_BRIGHTNESS` (default 80%, range 10%-100%).
+  Invalid values/types are logged and use that default; other storage errors
+  propagate. Initialization never automatically erases NVS or Wi-Fi credentials.
+- Only changed selections are written and committed, once per completed swipe;
+  wakes, fades, touch samples, and repeated limit swipes do not write flash.
+  Failed storage operations are logged and do not publish a new runtime selection.
+  There are no partition-layout changes.
+- The existing display-control queue serializes persistence and adjustments with
+  all wake sources. Startup images/test patterns and later wakes use the saved
+  selection. A changed target retargets an in-flight ramp from its last successful
+  applied value. Idle still fades through values below 10% to 0% before panel off.
+  Panel failures remain explicit and later activity retries the desired level.
+  GPIO18 retains the sound-bar toggle; PWR retains AP control. The temporary
+  right brightness overlay is the only new UI; no web/API changes are made.
+  Touch setup failure is logged without disabling networking,
+  orientation, microphones, or the other activity controls.
+- Vendor sources: [board initialization and axis flags](https://github.com/waveshareteam/Waveshare-ESP32-components/blob/23a6012d5e87d27399cf90fb851cab3689e29159/bsp/esp32_s3_touch_amoled_2_16/esp32_s3_touch_amoled_2_16.c),
+  [report protocol and one-point limit](https://github.com/waveshareteam/Waveshare-ESP32-components/blob/23a6012d5e87d27399cf90fb851cab3689e29159/display/touch/esp_lcd_touch_cst9217/esp_lcd_touch_cst9217.c).
+
+The compile-time tests above cover exact swipe thresholds, all four rotations,
+wake-only contacts, held/startup-held input, multi-touch, errors/rotation
+cancellation, release bounce, one proportional adjustment per swipe, exact
+19/20-pixel thresholds, half/full-screen distances, two-swipe 10%-100% behavior,
+both brightness bounds, live-preview hold/commit/revert (`tests/live_brightness_test.cpp`), and
+changed-target/interrupted ramps. `tests/brightness_settings_test.cpp` executes
+the real settings module against mock NVS headers in `tests/nvs_stubs`, without
+requiring a board. With a Visual Studio C++ developer environment loaded:
+
+```powershell
+cl /nologo /std:c++17 /EHsc /W4 /WX /DCONFIG_APP_ACTIVE_BRIGHTNESS=80 /I tests\nvs_stubs /I main tests\brightness_settings_test.cpp main\display\brightness_settings.cpp /Fe:$env:TEMP\brightness-settings-test.exe /Fo:$env:TEMP\
+if ($LASTEXITCODE -ne 0) { throw "Settings test compilation failed" }
+foreach ($scenario in @('default','restore','invalid-low','invalid-high','type','read-failure','open-failure','init-failure','write-failure','commit-failure','save-open-failure')) {
+    & "$env:TEMP\brightness-settings-test.exe" $scenario
+    if ($LASTEXITCODE -ne 0) { throw "Settings test failed: $scenario" }
+}
+Remove-Item "$env:TEMP\brightness-settings-test.exe", "$env:TEMP\brightness_settings_test.obj", "$env:TEMP\brightness_settings.obj"
+```
+
+Hardware acceptance requires separately approved flashing, then checking swipe
+directions in every orientation, 10%/100% limits, wake-only first contact,
+reboot/full power-cycle restoration, idle-off and all activity sources using the
+selection, and unchanged GPIO18/PWR and shared-I2C audio/orientation/PMIC behavior.
+A build cannot establish physical touch-axis mapping, NVS power-loss recovery,
+or measured luminance. No firmware flashing is implied.
+
+Stage 9 software validation: all four target-compiler C++17 regression suites
+pass, and all 11 host NVS scenarios pass against the real settings module.
+The ESP-IDF 6.1 ESP32-S3 build passes with the pinned standalone touch driver;
+the firmware image is 0x1264c0 bytes, leaving 54% of the 2.5 MiB application
+partition free. No LVGL component is linked. No firmware was flashed; the
+hardware acceptance above remains pending.
+
+Touch tuning software validation: the corrected swipe sign, 39/40-pixel
+detection boundary, proportional scaling across all 480 pixel distances,
+rotation/cancellation behavior, and two completed half-screen swipes from 10%
+to 100% pass target-compiler regression tests. The ESP-IDF build passes with
+firmware size 0x1264f0 bytes (54% app-partition space free). Firmware has not
+been flashed as part of this tuning; physical direction checks remain required.
+
+Brightness feedback software validation: the preview lifecycle tests pass for
+tolerance, clamping, release, wake-only contacts, multi-touch and orientation
+cancellation. Compile-time geometry checks confirm a separate right column,
+460-pixel bar height, and exact 10%/50%/100% fill heights. The ESP-IDF build
+passes (0x1267e0 bytes, 54% app-partition space free). No firmware was flashed.
+Board acceptance should additionally check live preview, disappearance and
+image restoration on release, and simultaneous independent left/right bars.
+
+Live brightness software validation: live hold/commit/revert tests, the
+`adjusting()` lifecycle through the release debounce, and the 19/20-pixel
+tolerance boundary pass target-compiler regression tests. The brightness bar is
+now drawn independently of the sound bar. The ESP-IDF build passes (0x1269a0
+bytes, 54% app-partition space free). No firmware was flashed. Board acceptance
+should check that brightness follows the finger without the sound bar shown,
+no flicker on release, instant revert on a second finger, and persistence.
+
+Rotation-aware overlay software validation: `tests/overlay_geometry_test.cpp`
+checks that the viewer/physical mappings are mutual inverses and match touch
+mapping, the exact physical rectangles for both bars at all four rotations,
+exact fill pixel counts at 0/10/50/100%, and fill growing from the viewer's
+bottom. The ESP-IDF build passes (0x126b10 bytes, 54% app-partition space
+free). No firmware was flashed; board acceptance should check both bars in all
+four orientations, including rotating while a bar is shown.
 
 ## 13. Critical development rules
 

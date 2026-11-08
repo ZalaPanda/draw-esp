@@ -1,9 +1,11 @@
 #include "display/display_driver.h"
+#include "display/brightness_settings.h"
 #include "image/image_decoder.h"
 #include "image/image_store.h"
 #include "input/brightness_button.h"
 #include "input/orientation.h"
 #include "input/noise_level.h"
+#include "input/touch_brightness.h"
 #include "network/network_api.h"
 #include "network/network_manager.h"
 #include "system/board_config.h"
@@ -58,7 +60,7 @@ bool restore_last_image()
         ESP_LOGW(kTag, "Saved image render failed (%s); showing test pattern", esp_err_to_name(error));
         return false;
     }
-    ESP_LOGI(kTag, "Restored saved image at default 20%% brightness");
+    ESP_LOGI(kTag, "Restored saved image at selected startup brightness");
     return true;
 }
 }
@@ -74,7 +76,9 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(psram_bytes == board::kPsramBytes ? ESP_OK : ESP_ERR_INVALID_SIZE);
 
     ESP_ERROR_CHECK(power_management::initialize());
-    ESP_ERROR_CHECK(display::initialize());
+    unsigned brightness = CONFIG_APP_ACTIVE_BRIGHTNESS;
+    ESP_ERROR_CHECK(display::initialize_brightness_settings(brightness));
+    ESP_ERROR_CHECK(display::initialize(brightness));
     // Brightness transitions intentionally update the panel several times. Keep the
     // component's per-step INFO messages out of the console while retaining warnings.
     esp_log_level_set("co5300_spi", ESP_LOG_WARN);
@@ -84,7 +88,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(image_store::initialize());
     if (!restore_last_image()) {
         ESP_ERROR_CHECK(display::show_test_pattern());
-        ESP_LOGI(kTag, "No saved image; showing the Stage 1 test pattern at 20%% brightness");
+        ESP_LOGI(kTag, "No saved image; showing the Stage 1 test pattern at %u%% brightness", brightness);
     }
 
     ESP_ERROR_CHECK(network::initialize());
@@ -98,6 +102,12 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(input::start_orientation_monitor());
     ESP_LOGI(kTag, "Stage 5 ready: QMI8658 stable-orientation image rotation enabled");
+
+    const esp_err_t touch_error = input::start_touch_brightness();
+    if (touch_error != ESP_OK) {
+        ESP_LOGE(kTag, "Touch brightness unavailable: %s; other activity controls remain available",
+                 esp_err_to_name(touch_error));
+    }
 
     const esp_err_t noise_error = input::start_noise_level_monitor();
     if (noise_error == ESP_OK) {

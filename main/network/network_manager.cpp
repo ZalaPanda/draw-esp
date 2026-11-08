@@ -16,7 +16,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
-#include "nvs_flash.h"
 
 namespace {
 constexpr char kTag[] = "network";
@@ -277,13 +276,6 @@ esp_err_t initialize()
                         "APP_HOSTNAME must be 1-32 ASCII letters, digits, or hyphens, and start/end with a letter or digit");
     network_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(network_mutex != nullptr, ESP_ERR_NO_MEM, kTag, "Network mutex allocation failed");
-
-    esp_err_t error = nvs_flash_init();
-    if (error == ESP_ERR_NVS_NO_FREE_PAGES || error == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGE(kTag, "NVS needs recovery; refusing to erase saved data automatically");
-        return error;
-    }
-    ESP_RETURN_ON_ERROR(error, kTag, "NVS initialization failed");
 
     uint8_t mac[6] = {};
     ESP_RETURN_ON_ERROR(esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP), kTag, "SoftAP MAC read failed");
