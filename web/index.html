@@ -2,40 +2,106 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ESP32 Display</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#181820">
+    <title>Pixel / ESP</title>
     <link rel="stylesheet" href="/style.css">
     <script src="/script.js" defer></script>
 </head>
 <body>
-    <h1>ESP32 Image Display</h1>
-    <section>
-        <h2>Status</h2>
-        <pre id="status">Loading…</pre>
-        <button id="refresh-button" type="button">Refresh</button>
-    </section>
-    <section>
-        <h2>Upload image</h2>
-        <input id="image" type="file" accept="image/jpeg,image/png,image/bmp">
-        <img id="preview" alt="Selected image preview" hidden>
-        <label>Fit
-            <select id="fit">
-                <option>contain</option>
-                <option>cover</option>
-                <option>stretch</option>
-            </select>
-        </label>
-        <button id="upload-button" type="button">Upload</button>
-        <button id="clear-button" type="button">Clear display</button>
-    </section>
-    <section>
-        <h2>Wi-Fi</h2>
-        <form id="wifi">
-            <label>SSID <input name="ssid" required maxlength="32"></label>
-            <label>Password <input name="password" type="password" maxlength="64"></label>
-            <button>Save and connect</button>
-        </form>
-        <p id="message"></p>
-    </section>
+    <div class="app">
+        <header class="app-header">
+            <nav aria-label="App views">
+                <button id="editor-tab" class="icon-button active" type="button" aria-label="Image editor" aria-pressed="true" aria-controls="editor" title="Image editor">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17 17 3l4 4L7 21H3v-4Zm11-11 4 4M3 17l4 4"/></svg>
+                </button>
+                <button id="setup-tab" class="icon-button" type="button" aria-label="Device setup" aria-pressed="false" aria-controls="setup" title="Device setup">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18M3 12h18M3 19h18M7 2v6m10 1v6M9 16v6"/></svg>
+                </button>
+            </nav>
+            <div id="editor-actions" class="editor-actions" role="group" aria-label="Image actions">
+                <button id="import-button" type="button" aria-label="Import image" title="Replace drawing with a local image">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8V4h18v16H3V8Zm0 10 6-6 4 4 4-5 4 6M7 8h1"/></svg><span>IMPORT</span>
+                </button>
+                <select id="fit" aria-label="Image import fit" title="Image import fit">
+                    <option value="contain">Contain</option>
+                    <option value="cover">Cover</option>
+                    <option value="stretch">Stretch</option>
+                </select>
+                <button id="download-button" type="button" aria-label="Download PNG" title="Download PNG">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M3 15v6h18v-6"/></svg><span>PNG</span>
+                </button>
+                <button id="send-button" class="primary" type="button" aria-label="Send to ESP" title="Send to ESP">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v14H3V4Zm5 18h8m-4-4v4M8 11h8m-4-4 4 4-4 4"/></svg><span>SEND TO ESP</span>
+                </button>
+                <input id="image" type="file" accept="image/jpeg,image/png,image/bmp" hidden>
+            </div>
+            <h1>PIXEL<span> / ESP</span></h1>
+            <span id="connection" class="connection">CONNECTING</span>
+        </header>
+
+        <main id="editor" class="editor" aria-label="Pixel editor">
+            <div class="editor-toolbar">
+                <label>GRID
+                    <select id="resolution" aria-label="Grid resolution">
+                        <option value="8">8 x 8</option>
+                        <option value="16">16 x 16</option>
+                        <option value="32" selected>32 x 32</option>
+                        <option value="64">64 x 64</option>
+                        <option value="128">128 x 128</option>
+                    </select>
+                </label>
+                <label>PALETTE
+                    <select id="palette" aria-label="Color palette">
+                        <option value="pico8">PICO-8</option>
+                        <option value="gameboy">Game Boy</option>
+                        <option value="nes">NES-inspired</option>
+                    </select>
+                </label>
+                <button id="grid-button" class="icon-button active" type="button" aria-label="Toggle grid" aria-pressed="true" title="Toggle grid">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h18v18H3V3Zm6 0v18m6-18v18M3 9h18M3 15h18"/></svg>
+                </button>
+            </div>
+
+            <div id="workspace" class="workspace">
+                <canvas id="canvas" width="256" height="256" aria-label="Pixel drawing canvas. Select a color and draw with touch, pen, or mouse."></canvas>
+            </div>
+
+            <div class="editor-controls">
+                <section class="palette-panel" aria-label="Drawing colors">
+                    <div class="panel-heading"><span>COLOR BANK</span><span id="color-value">#FF004D</span></div>
+                    <div id="swatches" class="swatches" aria-label="Palette colors"></div>
+                </section>
+                <p id="save-status" class="save-status" role="status">LOCAL DRAFT / READY</p>
+            </div>
+        </main>
+
+        <main id="setup" class="setup" aria-label="Device setup" hidden>
+            <section class="setup-card">
+                <div class="section-heading"><h2>01 / CONNECTION</h2><button id="refresh-button" type="button">REFRESH</button></div>
+                <dl id="status">
+                    <dt>Device</dt><dd id="device-name">Waiting for device...</dd>
+                    <dt>Station</dt><dd id="sta-status">--</dd>
+                    <dt>Station IP</dt><dd id="sta-ip">--</dd>
+                    <dt>Access point</dt><dd id="ap-status">--</dd>
+                    <dt>AP IP</dt><dd id="ap-ip">--</dd>
+                </dl>
+            </section>
+            <section class="setup-card">
+                <h2>02 / WI-FI SETUP</h2>
+                <p>Connect your display to a 2.4 GHz network. Use a trusted local network.</p>
+                <form id="wifi">
+                    <label>NETWORK SSID<input name="ssid" required maxlength="32" autocomplete="off" placeholder="Network name"></label>
+                    <label>PASSWORD<input name="password" type="password" maxlength="64" autocomplete="off" placeholder="Network password"></label>
+                    <button id="wifi-button" class="primary" type="submit">SAVE &amp; CONNECT</button>
+                </form>
+            </section>
+            <section class="setup-card device-actions">
+                <div><h2>03 / DEVICE DISPLAY</h2><p>Clear the device, not your local drawing.</p></div>
+                <button id="clear-button" type="button">CLEAR DEVICE</button>
+            </section>
+        </main>
+        <footer class="app-footer"><p id="message" role="status" aria-live="polite">MAKE SOMETHING PIXEL PERFECT.</p></footer>
+    </div>
 </body>
 </html>

@@ -1,6 +1,6 @@
 # Project: ESP32-S3 AMOLED Network Image Display
 
-![Real-life-photo](photo.png)
+![Real-life-esp](photo-esp.jpg) ![Real-life-app](photo-app.jpg)
 
 ## 1. Project goal
 
@@ -104,7 +104,7 @@ The following security properties were verified through espefuse:
 - VS Code with ESP-IDF extension
 - Windows development environment
 - Firmware language: C/C++ using ESP-IDF
-- Supporting development tools and future editor: Bun + TypeScript
+- Embedded web editor: plain JavaScript + CSS, with no frontend build step
 
 Do not use Arduino framework.
 
@@ -312,23 +312,78 @@ Keep the decoder interface independent of the HTTP implementation.
 
 Serve a small static web application directly from the device.
 
-Initially, the interface should contain:
+The interface is a retro-styled, mobile-first pixel editor with a compact icon
+menu switching between **Editor** and **Setup**. It uses plain CSS and JavaScript
+(arrow functions), system monospace fonts, and no framework, CDN, or frontend
+build step. This replaces the original deferred separate Bun + TypeScript editor:
+the editor now runs directly in the existing embedded static application and
+uploads its final rendered image through the unchanged REST API.
 
-- Device status
-- Network status
-- Current IP addresses
-- Image upload control
-- Image preview
-- Image fit selection (`contain`, `cover`, `stretch`)
-- Upload button
-- Clear display button
-- Wi-Fi configuration form
+Editor behavior:
 
-Keep the frontend simple.
+- Square drawing grids: `8×8`, `16×16`, `32×32` (initial default), `64×64`, and
+  `128×128`. Changing resolution resizes the current drawing with nearest-neighbor
+  sampling; shrinking can discard detail.
+- Draw directly with the selected color; there are no separate Draw, Erase, or
+  Clear canvas buttons. Select black in the PICO-8 or NES-inspired palette to
+  paint over pixels. The grid overlay toggle sits beside resolution and palette
+  selectors; grid lines are never included in exported images.
+- Predefined PICO-8, Game Boy, and NES-inspired color palettes. Changing palettes
+  only affects subsequent drawing, not existing pixels.
+- Import a local JPEG, PNG, or BMP into the current grid with `contain` (default),
+  `cover`, or `stretch`. Original colors are kept, with no palette quantization;
+  transparent pixels and contain padding are composited onto black. The canvas
+  previews the result before sending. Unsupported or malformed inputs report errors.
+- Import requires confirmation because there is no undo.
+- Download PNG at the drawing's logical grid resolution. **Send to ESP** uploads
+  an opaque `480×480` PNG with binary `image/png` content to
+  `POST /api/image?fit=stretch`, with nearest-neighbor scaling and the existing
+  1 MiB upload limit. `64×64` and `128×128` do not divide 480 evenly, so their
+  scaled pixel blocks can differ by one physical pixel.
+- One versioned localStorage draft automatically saves pixels, resolution,
+  palette, selected color, and grid visibility. Reload restores the drawing;
+  storage failures are reported and PNG download remains available. Storage is
+  browser- and origin-specific: the device's AP IP, STA IP, and mDNS hostname
+  each have separate drafts, and clearing browser data removes them.
+- Wi-Fi credentials are never saved in localStorage. Drawing and download remain
+  usable without a reachable device; sending and setup require the device API.
 
-The eventual image editor will be a separate Bun + TypeScript application. It will upload its final rendered image through the REST API.
+Setup retains device/network status and current IP addresses, manual and periodic
+status refresh, Wi-Fi SSID/password configuration, and **Clear device**. Clearing
+the device does not clear the local drawing.
 
-Do not implement the image editor now.
+The left-aligned view menu and a single row of Import/Fit/PNG/Send actions occupy
+the header. These actions are visible only in Editor; compact screens use labeled
+icon buttons with accessible names and tooltips instead of visible action text.
+Portrait prioritizes a full-width square drawing area with minimal margins;
+landscape places selectors and colors beside the canvas to maximize its height,
+with palette colors filling two columns top-to-bottom.
+Square viewports use the side-panel layout and fit the canvas to the smaller
+available dimension. Short portrait viewports may need editor-panel scrolling
+to preserve the full-width canvas; the document itself does not scroll.
+Constrained panel scrolling also keeps controls reachable with enlarged text
+or the virtual keyboard. At `128×128`, individual cells are small on phones. Zoom/pan, undo/redo,
+fill, eyedropper, shapes, layers, animation, and a multi-drawing gallery are
+intentionally outside this editor's scope.
+
+App text and canvas long-press selection/context menus are disabled; Wi-Fi text
+fields still support selection and editing. Touch gestures permit panel scrolling
+but disable pinch and double-tap zoom, with viewport restrictions and an app
+gesture guard for Safari. Browsers may override zoom restrictions for accessibility;
+desktop browser zoom shortcuts are not intercepted.
+
+Editor software validation: JavaScript syntax checks and session-local
+Playwright/Edge checks pass with the firmware CSP and mocked same-origin APIs.
+Coverage includes all five PNG grid sizes, exact `480×480` uploads, touch/pen
+strokes, orientation changes, import fitting and transparency, draft recovery
+and storage failures, and API errors/offline drawing. The compact layout is
+checked for full-width portrait and height-filling landscape canvases,
+single-row header actions, square viewports, and preserved draft/export behavior.
+Additional browser checks cover top-to-bottom landscape palettes, suppressed
+selection/context menus, editable Wi-Fi fields, gesture cancellation, and an
+emulated two-finger pinch retaining viewport scale 1.
+The ESP-IDF 6.1 build passes with the embedded editor (54% of the app partition
+free). No firmware was flashed; physical-device rendering remains to be tested.
 
 Do not couple the firmware to a particular frontend framework.
 

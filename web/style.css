@@ -1,36 +1,199 @@
+:root {
+    color-scheme: dark;
+    --background: #181820;
+    --panel: #24242f;
+    --edge: #454553;
+    --muted: #aaa9bb;
+    --text: #f7f1e8;
+    --accent: #ff2869;
+    --success: #b9ef76;
+    font: 12px "Courier New", monospace;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
-    max-width: 680px;
-    margin: 2rem auto;
-    padding: 0 1rem;
-    color: #18202a;
-    font: 16px system-ui;
+    margin: 0;
+    background: var(--background);
+    color: var(--text);
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: pan-x pan-y;
 }
-
-section {
-    margin: 1rem 0;
-    padding: 1rem;
-    border: 1px solid #ccd3dc;
-    border-radius: 10px;
+button, select, input { font: inherit; }
+button, select, input {
+    border: 2px solid var(--edge);
+    border-radius: 0;
+    color: var(--text);
+    background: var(--panel);
+    min-height: 40px;
 }
-
-label {
-    display: block;
-    margin: 0.6rem 0;
-}
-
-input,
-select,
 button {
-    padding: 0.5rem;
-    font: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px 12px;
+    font-weight: bold;
+    cursor: pointer;
+    touch-action: manipulation;
 }
+button:hover { border-color: var(--muted); }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.5; cursor: wait; }
+button.active { border-color: var(--accent); color: var(--accent); background: #3b2031; }
+button.primary { color: white; border-color: var(--accent); background: var(--accent); }
+:focus-visible { outline: 2px solid var(--success); outline-offset: 3px; }
+select { padding: 6px 28px 6px 8px; width: 100%; }
+input { width: 100%; padding: 10px; -webkit-user-select: text; user-select: text; }
+svg { width: 20px; height: 20px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 2; stroke-linejoin: miter; }
+h1, h2, p { margin: 0; }
 
-pre {
-    white-space: pre-wrap;
+.app {
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    overflow: hidden;
 }
-
-#preview:not([hidden]) {
+.app-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 52px;
+    padding: 5px 8px;
+    border-bottom: 2px solid var(--accent);
+    flex-shrink: 0;
+}
+h1 { font-size: 18px; letter-spacing: -1px; white-space: nowrap; }
+h1 span { color: var(--muted); }
+nav { display: flex; gap: 4px; flex-shrink: 0; }
+.icon-button { width: 40px; padding: 8px; }
+.editor-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.editor-actions button { white-space: nowrap; }
+.editor-actions select { width: 98px; flex-shrink: 0; padding-left: 6px; padding-right: 18px; }
+.app-header h1 { margin-left: auto; }
+.connection { font-size: 10px; color: var(--muted); }
+.connection.online { color: var(--success); }
+.connection.offline { color: var(--accent); }
+.editor {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    overflow: auto;
+    scrollbar-width: none;
+}
+.editor::-webkit-scrollbar { display: none; }
+.editor-toolbar { display: flex; align-items: end; gap: 8px; flex-shrink: 0; }
+.editor-toolbar label { flex: 1; min-width: 0; color: var(--muted); font-size: 10px; letter-spacing: 1px; }
+.editor-toolbar select { margin-top: 4px; font-size: 12px; color: var(--text); letter-spacing: 0; }
+.workspace {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    aspect-ratio: 1;
+    width: 100%;
+    min-width: 0;
+    background-color: #101016;
+    background-image: linear-gradient(45deg, #1d1d27 25%, transparent 25%, transparent 75%, #1d1d27 75%),
+        linear-gradient(45deg, #1d1d27 25%, transparent 25%, transparent 75%, #1d1d27 75%);
+    background-position: 0 0, 8px 8px;
+    background-size: 16px 16px;
+    overflow: hidden;
+}
+#canvas {
     display: block;
-    max-width: 100%;
-    margin-top: 1rem;
+    max-width: calc(100% - 6px);
+    max-height: calc(100% - 6px);
+    flex-shrink: 0;
+    outline: 3px solid var(--edge);
+    image-rendering: pixelated;
+    touch-action: none;
+    -webkit-touch-callout: none;
+    cursor: crosshair;
+}
+.editor-controls { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; min-width: 0; }
+.palette-panel { padding: 8px; background: var(--panel); border: 2px solid var(--edge); }
+.panel-heading { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 10px; color: var(--muted); }
+#color-value { color: var(--text); }
+.swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+.swatch { height: 32px; min-height: 32px; min-width: 0; padding: 0; border: 2px solid transparent; overflow: hidden; }
+.swatch canvas { width: 100%; height: 100%; display: block; pointer-events: none; }
+.swatch.selected { border-color: white; outline: 2px solid var(--accent); outline-offset: 0; }
+.save-status { font-size: 9px; color: var(--muted); min-height: 12px; }
+.save-status.error { color: var(--accent); }
+.app-footer { flex-shrink: 0; padding: 7px 12px; border-top: 1px solid var(--edge); background: var(--panel); }
+#message { font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; max-height: 42px; overflow: auto; }
+#message.error { color: #ff92af; }
+#message.success { color: var(--success); }
+.setup { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+.setup-card { max-width: 680px; margin: 0 auto 16px; padding: 16px; border: 2px solid var(--edge); background: var(--panel); }
+.setup-card h2 { font-size: 13px; color: var(--accent); margin-bottom: 12px; }
+.setup-card p { color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.section-heading h2 { margin-bottom: 0; }
+dl { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; margin: 16px 0 0; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+#wifi { display: grid; gap: 14px; }
+#wifi label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
+.device-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.device-actions p { margin-bottom: 0; }
+
+@media (max-width: 360px) {
+    .setup-card { padding: 12px; }
+    .device-actions { align-items: stretch; flex-direction: column; }
+}
+
+@media (max-width: 760px) {
+    .app-header h1, .connection { display: none; }
+    .editor-actions { flex: 1; justify-content: flex-end; gap: 4px; }
+    .editor-actions button { width: 40px; padding: 8px; }
+    .editor-actions button span { display: none; }
+    .editor-actions select { width: 86px; font-size: 11px; }
+}
+
+@media (min-aspect-ratio: 1/1) {
+    .editor {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) clamp(200px, 30vw, 300px);
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 8px 12px;
+        width: 100%;
+    }
+    .workspace { grid-column: 1; grid-row: 1 / 3; aspect-ratio: auto; height: 100%; min-height: 0; }
+    .editor-toolbar { grid-column: 2; grid-row: 1; }
+    .editor-controls { grid-column: 2; grid-row: 2; overflow: auto; }
+    .palette-panel { flex: 1 1 0; min-height: 200px; display: flex; flex-direction: column; }
+    .swatches {
+        flex: 1;
+        min-height: 0;
+        grid-auto-flow: column;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-rows: repeat(8, minmax(0, 1fr));
+    }
+    .swatch { position: relative; height: 100%; min-height: 0; }
+    .swatch canvas { position: absolute; inset: 0; }
+}
+
+@media (min-width: 761px) and (max-width: 1000px) {
+    .app-header h1 { display: none; }
+    .connection { margin-left: auto; }
+}
+
+@media (max-aspect-ratio: 999/1000) and (max-height: 700px) {
+    .app-header { padding-top: 3px; padding-bottom: 3px; min-height: 48px; }
+    .editor { gap: 5px; }
+    .editor-toolbar select { margin-top: 2px; min-height: 36px; }
+    .editor-toolbar .icon-button { min-height: 36px; height: 36px; }
+    .palette-panel { padding: 6px; }
+    .swatch { height: 28px; min-height: 28px; }
+    .app-footer { padding-top: 5px; padding-bottom: 5px; }
 }
