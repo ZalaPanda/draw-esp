@@ -8,6 +8,7 @@
 #include "display/display_driver.h"
 #include "image/image_decoder.h"
 #include "image/image_store.h"
+#include "system/board_config.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
@@ -251,8 +252,8 @@ esp_err_t handle_device(httpd_req_t *request)
     cJSON_AddBoolToObject(root, "success", true);
     cJSON_AddStringToObject(root, "name", "ESP32 Network Image Display");
     cJSON_AddStringToObject(root, "model", "Waveshare ESP32-S3-Touch-AMOLED-2.16");
-    cJSON_AddNumberToObject(root, "display_width", 480);
-    cJSON_AddNumberToObject(root, "display_height", 480);
+    cJSON_AddNumberToObject(root, "display_width", board::kDisplayWidth);
+    cJSON_AddNumberToObject(root, "display_height", board::kDisplayHeight);
     return send_json(request, root);
 }
 

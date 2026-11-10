@@ -45,10 +45,18 @@ esp_err_t decode_png(const uint8_t *data, size_t size, DecodedImage &image)
     const uint32_t width = png.width;
     const uint32_t height = png.height;
     for (size_t i = 0; i < pixel_count; ++i) {
-        const uint32_t alpha = rgba[4 * i + 3];
-        const uint32_t red = (static_cast<uint32_t>(rgba[4 * i]) * alpha + 127) / 255;
-        const uint32_t green = (static_cast<uint32_t>(rgba[4 * i + 1]) * alpha + 127) / 255;
-        const uint32_t blue = (static_cast<uint32_t>(rgba[4 * i + 2]) * alpha + 127) / 255;
+        const uint8_t *source = rgba + 4 * i;
+        uint32_t red = source[0];
+        uint32_t green = source[1];
+        uint32_t blue = source[2];
+        const uint32_t alpha = source[3];
+        if (alpha != 255) {
+            // Preserve the existing black-background compositing for actual
+            // transparency; opaque pixels need no multiply/divide per channel.
+            red = (red * alpha + 127) / 255;
+            green = (green * alpha + 127) / 255;
+            blue = (blue * alpha + 127) / 255;
+        }
         pixels[i] = static_cast<uint16_t>(((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3));
     }
     heap_caps_free(rgba);

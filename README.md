@@ -349,7 +349,10 @@ Editor behavior:
 - Draw directly with the selected color; there are no separate Draw, Erase, or
   Clear canvas buttons. Select black in the PICO-8 or NES-inspired palette to
   paint over pixels. The grid overlay toggle sits beside resolution and palette
-  selectors; grid lines are never included in exported images.
+  selectors; grid lines are never included in exported images. The editor keeps
+  a cached pixel buffer and grid layer, updates only changed pixels during a
+  stroke, and coalesces pointer events into one render per animation frame; the
+  final canvas, downloads, and uploads are unchanged.
 - Predefined PICO-8, Game Boy, and NES-inspired color palettes. Changing palettes
   only affects subsequent drawing, not existing pixels.
 - Import a local JPEG, PNG, or BMP into the current grid with `contain` (default),
@@ -546,7 +549,7 @@ The Stage 1A 11-step brightness-cycle assertions were removed with that cycle in
 
 ```powershell
 # After loading the ESP-IDF profile:
-xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp tests\activity_state_test.cpp tests\sound_events_test.cpp tests\touch_gesture_test.cpp tests\live_brightness_test.cpp tests\overlay_geometry_test.cpp
+xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp tests\activity_state_test.cpp tests\sound_events_test.cpp tests\touch_gesture_test.cpp tests\live_brightness_test.cpp tests\overlay_geometry_test.cpp tests\render_mapping_test.cpp tests\crc32_test.cpp
 if ($LASTEXITCODE -ne 0) { throw "Logic regression tests failed" }
 python "$env:IDF_PATH\tools\idf.py" build
 if ($LASTEXITCODE -ne 0) { throw "Firmware build failed" }
@@ -674,7 +677,7 @@ Stage 7 remains the sound-level measurement and indicator foundation. Stage 8 ad
 ### Stage 6 implementation — persistent last image and timed brightness (timing superseded by Stage 8)
 
 - `partitions.csv` provides two alternating raw flash slots, each large enough for the maximum 1 MiB compressed upload plus metadata. The slots are separate from NVS and the application partition.
-- `main/image/image_store.cpp` stores the original compressed JPEG/PNG/BMP bytes, selected fit mode, generation, and CRC32. Each update is written to the inactive slot and commits its header last, so a power loss during an upload leaves the previous image recoverable. `DELETE /api/image` writes a clear marker so the old slot is not restored after reboot.
+- `main/image/image_store.cpp` stores the original compressed JPEG/PNG/BMP bytes, selected fit mode, generation, and CRC32. Each update is written to the inactive slot and commits its header last, so a power loss during an upload leaves the previous image recoverable. To reduce upload latency and flash wear, an update erases only the header sector plus the sectors occupied by the new payload; a clear marker erases one header sector. Every update erases the header before writing the payload and commits the magic last, preserving the interrupted-write recovery rule. Bytes beyond the new record remain stale in flash but are never read by the API; secure erasure of old image data would require the previous full-slot erase. `DELETE /api/image` writes a clear marker so the old slot is not restored after reboot.
 - At startup, the firmware validates the newest saved record, decodes it, and renders it at the selected startup brightness (historically 20%; Stage 9 restores the saved touch level, defaulting to 80%). If there is no saved image or the saved data is invalid, it displays the existing test pattern.
 - Historically, uploads displayed at 100% for 30 seconds before returning to 20%, and GPIO18 resumed manual brightness control. Stage 8 replaces this with activity-controlled 80% brightness and fade-to-off.
 - Clearing still commits a persistent clear marker. In Stage 8 it also wakes the display and restarts the activity timer instead of setting 20%.
@@ -865,6 +868,42 @@ exact fill pixel counts at 0/10/50/100%, and fill growing from the viewer's
 bottom. The ESP-IDF build passes (0x126b10 bytes, 54% app-partition space
 free). No firmware was flashed; board acceptance should check both bars in all
 four orientations, including rotating while a bar is shown.
+
+Performance optimization software validation (2026-11-10): the low-risk
+optimization pass keeps all documented behavior while reducing per-frame work.
+The firmware precomputes nearest-neighbor sampling maps once per render (with a
+direct-copy fast path for 1:1 rotation-0 frames), computes each bar's fill band
+once instead of per pixel, and only redraws or restores an overlay after a
+full-frame flush when it is actually visible. PNG decoding skips unnecessary
+alpha compositing for opaque pixels. `main/image/crc32.h` replaces the
+bit-at-a-time CRC with a table implementation that is bit-identical for stored
+records. `/api/device` uses the board display constants, and disconnected
+interfaces no longer report `0.0.0.0`. The web editor caches its pixel and grid
+buffers, updates only changed pixels, reuses one pointer rectangle per move, and
+coalesces pointer events to one animation frame. New target-compiler tests
+compare all four rotation mappings across source dimensions and the sampling
+formula against the previous implementations, and verify the CRC against the
+standard check value and the old loop. `node --check` passes, all host
+regression tests pass, and the ESP-IDF 6.1 build passes at 0x1272e0 bytes (54%
+of the 2.5 MiB application partition free).
+No firmware was flashed. Board acceptance should confirm unchanged rendering for
+all fit modes/rotations, both overlays, web drawing/export, and that an image
+stored by the previous firmware still restores (CRC compatibility).
+
+Partial-slot erase software validation (2026-11-10):
+`record_erase_size()` rounds the 32-byte header plus the 4-byte-padded payload up
+to the 4 KiB sector size. Compile-time assertions cover the 4 KiB boundary and
+the 1 MiB maximum, which erases 257 of the slot's 272 sectors instead of all
+272; smaller uploads save proportionally more. `clear()` erases one sector for
+its header-only tombstone. The header is still erased before payload writes and
+its magic is committed last, so an interrupted operation leaves the target slot
+invalid and the previous record recoverable. Host regression tests and the
+ESP-IDF 6.1 build pass; the firmware is 0x127410 bytes, leaving 54% of the
+2.5 MiB application partition free. No firmware was flashed. Board acceptance must repeat
+interrupted upload and clear tests at each stage (during erase, payload write,
+and header commit) and confirm recovery of the previous image or clear marker.
+Upload latency and wear reduction still require measurement on the board, and
+the stale-payload tradeoff above means this is not secure erasure.
 
 ## 13. Critical development rules
 

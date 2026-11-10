@@ -18,6 +18,11 @@ canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 const context = canvas.getContext('2d');
 const pixelCanvas = document.createElement('canvas');
 const pixelContext = pixelCanvas.getContext('2d');
+const gridCanvas = document.createElement('canvas');
+const gridContext = gridCanvas.getContext('2d');
+let pixelImage = null;
+let gridCacheKey = '';
+let renderFrame = 0;
 let state = {
     size: 32,
     pixels: Array(32 * 32).fill('#000000'),
@@ -41,6 +46,17 @@ const saveStatus = (text, failed = false) => {
     byId('save-status').classList.toggle('error', failed);
 };
 const isColor = (value) => typeof value === 'string' && /^#[0-9A-F]{6}$/i.test(value);
+const invalidatePixelCache = () => {
+    pixelImage = null;
+};
+const writePixel = (image, index, color) => {
+    const rgb = parseInt(color.slice(1), 16);
+    const offset = index * 4;
+    image.data[offset] = (rgb >> 16) & 255;
+    image.data[offset + 1] = (rgb >> 8) & 255;
+    image.data[offset + 2] = rgb & 255;
+    image.data[offset + 3] = 255;
+};
 const restore = () => {
     try {
         const raw = localStorage.getItem(storageKey);
@@ -59,6 +75,7 @@ const restore = () => {
             color: draft.color,
             grid: draft.grid,
         };
+        invalidatePixelCache();
         saveStatus('LOCAL DRAFT / RESTORED');
     } catch (error) {
         saveStatus(`DRAFT NOT RESTORED / ${error.message}`, true);
@@ -85,35 +102,47 @@ const scheduleSave = () => {
 };
 
 const renderPixels = () => {
-    pixelCanvas.width = state.size;
-    pixelCanvas.height = state.size;
-    const image = pixelContext.createImageData(state.size, state.size);
-    state.pixels.forEach((color, index) => {
-        const rgb = parseInt(color.slice(1), 16);
-        image.data[index * 4] = (rgb >> 16) & 255;
-        image.data[index * 4 + 1] = (rgb >> 8) & 255;
-        image.data[index * 4 + 2] = rgb & 255;
-        image.data[index * 4 + 3] = 255;
-    });
-    pixelContext.putImageData(image, 0, 0);
+    if (pixelImage === null || pixelImage.width !== state.size) {
+        pixelCanvas.width = state.size;
+        pixelCanvas.height = state.size;
+        pixelImage = pixelContext.createImageData(state.size, state.size);
+        state.pixels.forEach((color, index) => writePixel(pixelImage, index, color));
+    }
+    pixelContext.putImageData(pixelImage, 0, 0);
+};
+const renderGrid = () => {
+    const key = `${canvas.width}x${canvas.height}:${state.size}`;
+    if (gridCacheKey === key) return;
+    gridCacheKey = key;
+    gridCanvas.width = canvas.width;
+    gridCanvas.height = canvas.height;
+    gridContext.strokeStyle = 'rgba(180, 180, 200, 0.3)';
+    gridContext.lineWidth = 1;
+    gridContext.beginPath();
+    for (let index = 1; index < state.size; index++) {
+        const point = Math.round(index * canvas.width / state.size) + 0.5;
+        gridContext.moveTo(point, 0);
+        gridContext.lineTo(point, canvas.height);
+        gridContext.moveTo(0, point);
+        gridContext.lineTo(canvas.width, point);
+    }
+    gridContext.stroke();
 };
 const render = () => {
     renderPixels();
     context.imageSmoothingEnabled = false;
     context.drawImage(pixelCanvas, 0, 0, canvas.width, canvas.height);
     if (state.grid) {
-        context.strokeStyle = 'rgba(180, 180, 200, 0.3)';
-        context.lineWidth = 1;
-        context.beginPath();
-        for (let index = 1; index < state.size; index++) {
-            const point = Math.round(index * canvas.width / state.size) + 0.5;
-            context.moveTo(point, 0);
-            context.lineTo(point, canvas.height);
-            context.moveTo(0, point);
-            context.lineTo(canvas.width, point);
-        }
-        context.stroke();
+        renderGrid();
+        context.drawImage(gridCanvas, 0, 0);
     }
+};
+const requestRender = () => {
+    if (renderFrame !== 0) return;
+    renderFrame = requestAnimationFrame(() => {
+        renderFrame = 0;
+        render();
+    });
 };
 const resizeViewport = () => {
     const bounds = byId('workspace').getBoundingClientRect();
@@ -182,13 +211,17 @@ const paintLine = (from, to) => {
     const stepY = y < to.y ? 1 : -1;
     let difference = dx + dy;
     while (true) {
-        state.pixels[y * state.size + x] = state.color;
+        const index = y * state.size + x;
+        state.pixels[index] = state.color;
+        if (pixelImage !== null && pixelImage.width === state.size) {
+            writePixel(pixelImage, index, state.color);
+        }
         if (x === to.x && y === to.y) break;
         const twice = 2 * difference;
         if (twice >= dy) { difference += dy; x += stepX; }
         if (twice <= dx) { difference += dx; y += stepY; }
     }
-    render();
+    requestRender();
     scheduleSave();
 };
 canvas.addEventListener('pointerdown', (event) => {
@@ -205,8 +238,9 @@ canvas.addEventListener('pointermove', (event) => {
         endStroke();
         return;
     }
-    paintLine(stroke.point, cellAt(event));
-    stroke.point = cellAt(event);
+    const point = cellAt(event);
+    paintLine(stroke.point, point);
+    stroke.point = point;
 });
 canvas.addEventListener('pointerup', (event) => {
     if (stroke && event.pointerId === stroke.id) {
@@ -240,6 +274,7 @@ byId('resolution').addEventListener('change', (event) => {
     });
     state.size = size;
     state.pixels = pixels;
+    invalidatePixelCache();
     syncSettings();
     render();
     scheduleSave();
@@ -316,6 +351,7 @@ const importImage = async (file) => {
             return `#${[rgba[offset], rgba[offset + 1], rgba[offset + 2]]
                 .map((channel) => channel.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
         });
+        invalidatePixelCache();
         render();
         scheduleSave();
         message('Image imported. Original colors kept.', 'success');

@@ -461,13 +461,13 @@ esp_err_t get_status(Status &status)
     }
     if (ap_netif != nullptr) {
         esp_netif_ip_info_t info = {};
-        if (esp_netif_get_ip_info(ap_netif, &info) == ESP_OK) {
+        if (esp_netif_get_ip_info(ap_netif, &info) == ESP_OK && info.ip.addr != 0) {
             std::snprintf(status.ap_ip, sizeof(status.ap_ip), IPSTR, IP2STR(&info.ip));
         }
     }
     if (sta_netif != nullptr) {
         esp_netif_ip_info_t info = {};
-        if (esp_netif_get_ip_info(sta_netif, &info) == ESP_OK) {
+        if (esp_netif_get_ip_info(sta_netif, &info) == ESP_OK && info.ip.addr != 0) {
             std::snprintf(status.sta_ip, sizeof(status.sta_ip), IPSTR, IP2STR(&info.ip));
         }
     }

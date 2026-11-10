@@ -57,6 +57,28 @@ constexpr bool test_rect_sizes_and_fill()
     return true;
 }
 
+// The hoisted fill span used by draw_bar_locked must match the per-pixel predicate.
+constexpr bool test_fill_span()
+{
+    for (unsigned rotation = 0; rotation < 4; ++rotation) {
+        for (const int left : {display::kSoundBarLeft, display::kBrightnessBarLeft}) {
+            const OverlayRect rect = display::bar_rect(left, rotation);
+            for (const unsigned level : {0U, 10U, 50U, 100U, 150U}) {
+                const display::OverlaySpan span = display::bar_fill_span(rect, rotation, level);
+                for (int y = rect.y0; y < rect.y1; ++y) {
+                    for (int x = rect.x0; x < rect.x1; ++x) {
+                        const bool expected = display::bar_pixel_filled({x, y}, rotation, level);
+                        const bool actual = (rotation == 0 || rotation == 2)
+                            ? span.contains(y) : span.contains(x);
+                        if (expected != actual) return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // The fill grows from the viewer's bottom edge, whichever physical edge that is.
 constexpr bool viewer_bottom_filled(unsigned rotation)
 {
@@ -69,6 +91,7 @@ constexpr bool viewer_bottom_filled(unsigned rotation)
 
 static_assert(test_inverse_and_touch_match());
 static_assert(test_rect_sizes_and_fill());
+static_assert(test_fill_span());
 static_assert(viewer_bottom_filled(0) && viewer_bottom_filled(1) &&
               viewer_bottom_filled(2) && viewer_bottom_filled(3));
 // Rotation 90: viewer bottom is the physical left edge.

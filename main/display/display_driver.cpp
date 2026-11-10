@@ -4,12 +4,14 @@
 #include "brightness_settings.h"
 #include "live_brightness.h"
 #include "overlay_geometry.h"
+#include "render_mapping.h"
 #include "system/board_config.h"
 
 #include <algorithm>
 #include <cinttypes>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_co5300.h"
@@ -150,8 +152,10 @@ constexpr uint16_t gray_rgb565(unsigned gray)
 
 esp_err_t flush_framebuffer()
 {
-    indicator_dirty = true;
-    brightness_indicator_dirty = true;
+    // A full-frame transfer already writes unobstructed framebuffer pixels under
+    // hidden overlays; only visible bars need to be redrawn afterwards.
+    indicator_dirty = indicator_visible;
+    brightness_indicator_dirty = brightness_indicator_visible;
     for (int y = 0; y < board::kDisplayHeight; y += kStripeRows) {
         const uint16_t *source = framebuffer + y * board::kDisplayWidth;
         for (size_t i = 0; i < kStripePixels; ++i) {
@@ -173,27 +177,26 @@ void render_source()
                               current_rotation == display::Rotation::deg270;
     const int width = quarter_turn ? source_height : source_width;
     const int height = quarter_turn ? source_width : source_height;
-    const auto pixel_at = [&](int x, int y) -> uint16_t {
-        int sx = x;
-        int sy = y;
-        switch (current_rotation) {
-        case display::Rotation::deg90: sx = y; sy = source_height - 1 - x; break;
-        case display::Rotation::deg180: sx = source_width - 1 - x; sy = source_height - 1 - y; break;
-        case display::Rotation::deg270: sx = source_width - 1 - y; sy = x; break;
-        case display::Rotation::deg0: break;
-        }
-        return source_image[sy * source_width + sx];
-    };
+
     std::memset(framebuffer, 0, kFramePixels * sizeof(uint16_t));
-    if (source_fit == display::FitMode::stretch) {
-        for (int y = 0; y < board::kDisplayHeight; ++y) {
-            const int sy = static_cast<int>((static_cast<int64_t>(y) * height) / board::kDisplayHeight);
-            for (int x = kImageLeft; x < board::kDisplayWidth; ++x) {
-                const int sx = static_cast<int>((static_cast<int64_t>(x - kImageLeft) * width) / kImageWidth);
-                framebuffer[y * board::kDisplayWidth + x] = pixel_at(sx, sy);
-            }
-        }
-    } else {
+
+    if (current_rotation == display::Rotation::deg0 &&
+        width == kImageWidth && height == board::kDisplayHeight) {
+        // Every fit mode is an exact 1:1 mapping at this size: stretch copies
+        // the source, and contain/cover compute scale 1 with zero offsets.
+        std::memcpy(framebuffer, source_image, kFramePixels * sizeof(uint16_t));
+        return;
+    }
+
+    const display::RotationTransform transform = display::rotation_transform(
+        static_cast<unsigned>(current_rotation), source_width, source_height);
+
+    const bool stretch = source_fit == display::FitMode::stretch;
+    int sample_offset_x = kImageLeft;
+    int sample_offset_y = 0;
+    int sample_width = kImageWidth;
+    int sample_height = board::kDisplayHeight;
+    if (!stretch) {
         const double scale = source_fit == display::FitMode::contain
             ? std::min(static_cast<double>(kImageWidth) / width,
                        static_cast<double>(board::kDisplayHeight) / height)
@@ -201,15 +204,31 @@ void render_source()
                        static_cast<double>(board::kDisplayHeight) / height);
         const int scaled_width = std::max(1, static_cast<int>(width * scale));
         const int scaled_height = std::max(1, static_cast<int>(height * scale));
-        const int offset_x = kImageLeft + (kImageWidth - scaled_width) / 2;
-        const int offset_y = (board::kDisplayHeight - scaled_height) / 2;
-        for (int y = 0; y < board::kDisplayHeight; ++y) {
-            const int sy = static_cast<int>((static_cast<int64_t>(y - offset_y) * height) / scaled_height);
-            if (sy < 0 || sy >= height) continue;
-            for (int x = kImageLeft; x < board::kDisplayWidth; ++x) {
-                const int sx = static_cast<int>((static_cast<int64_t>(x - offset_x) * width) / scaled_width);
-                if (sx >= 0 && sx < width) framebuffer[y * board::kDisplayWidth + x] = pixel_at(sx, sy);
-            }
+        sample_offset_x = kImageLeft + (kImageWidth - scaled_width) / 2;
+        sample_offset_y = (board::kDisplayHeight - scaled_height) / 2;
+        sample_width = scaled_width;
+        sample_height = scaled_height;
+    }
+
+    // Precompute the source-column offsets once per render. The previous inline
+    // loop performed a 64-bit division and a rotation switch for every pixel.
+    // render_source always runs under display_mutex, so this cache is safe.
+    static int x_offsets[board::kDisplayWidth];
+    constexpr int kNoPixel = std::numeric_limits<int>::min();
+    for (int x = kImageLeft; x < board::kDisplayWidth; ++x) {
+        const int sx = display::sample_coordinate(x, sample_offset_x, width, sample_width);
+        const bool valid = stretch || (sx >= 0 && sx < width);
+        x_offsets[x] = valid ? sx * transform.x_step : kNoPixel;
+    }
+
+    for (int y = 0; y < board::kDisplayHeight; ++y) {
+        const int sy = display::sample_coordinate(y, sample_offset_y, height, sample_height);
+        if (sy < 0 || sy >= height) continue;
+        const int row_base = transform.base + sy * transform.y_step;
+        uint16_t *row = framebuffer + y * board::kDisplayWidth;
+        for (int x = kImageLeft; x < board::kDisplayWidth; ++x) {
+            const int offset = x_offsets[x];
+            if (offset != kNoPixel) row[x] = source_image[row_base + offset];
         }
     }
 }
@@ -235,7 +254,6 @@ esp_err_t render_image(const uint16_t *pixels, int width, int height, display::F
     source_fit = fit;
     render_source();
     error = flush_framebuffer();
-    indicator_dirty = true;
     if (error == ESP_OK && !new_upload) error = set_panel_locked(true);
     if (error == ESP_OK && new_upload) error = display::notify_activity("image upload");
     xSemaphoreGive(display_mutex);
@@ -510,13 +528,25 @@ esp_err_t draw_bar_locked(int left, unsigned level, uint16_t fill_color)
                   display::bar_filled_rows(50) == 230 && display::bar_filled_rows(100) == 460);
     const unsigned rotation = static_cast<unsigned>(current_rotation);
     const display::OverlayRect rect = display::bar_rect(left, rotation);
+    const display::OverlaySpan fill = display::bar_fill_span(rect, rotation, level);
     size_t byte_index = 0;
-    for (int y = rect.y0; y < rect.y1; ++y) {
-        for (int x = rect.x0; x < rect.x1; ++x) {
-            const uint16_t color = display::bar_pixel_filled({x, y}, rotation, level)
-                ? fill_color : kBackground;
-            transfer_buffer[byte_index++] = static_cast<uint8_t>(color >> 8);
-            transfer_buffer[byte_index++] = static_cast<uint8_t>(color);
+    // The fill band spans the full bar width (or height) on one physical axis,
+    // so the per-pixel geometry conversion is unnecessary.
+    if (rotation == 0 || rotation == 2) {
+        for (int y = rect.y0; y < rect.y1; ++y) {
+            const uint16_t color = fill.contains(y) ? fill_color : kBackground;
+            for (int x = rect.x0; x < rect.x1; ++x) {
+                transfer_buffer[byte_index++] = static_cast<uint8_t>(color >> 8);
+                transfer_buffer[byte_index++] = static_cast<uint8_t>(color);
+            }
+        }
+    } else {
+        for (int y = rect.y0; y < rect.y1; ++y) {
+            for (int x = rect.x0; x < rect.x1; ++x) {
+                const uint16_t color = fill.contains(x) ? fill_color : kBackground;
+                transfer_buffer[byte_index++] = static_cast<uint8_t>(color >> 8);
+                transfer_buffer[byte_index++] = static_cast<uint8_t>(color);
+            }
         }
     }
     return transfer_rect_locked(rect);
@@ -561,7 +591,6 @@ esp_err_t set_rotation(Rotation rotation)
     if (source_image != nullptr) {
         render_source();
         error = flush_framebuffer();
-        indicator_dirty = true;
     } else if (rotated) {
         // Overlays move with the rotation; erase their old physical position.
         error = flush_framebuffer();
@@ -582,7 +611,6 @@ esp_err_t clear()
         source_width = source_height = 0;
     }
     esp_err_t error = flush_framebuffer();
-    indicator_dirty = true;
     if (error == ESP_OK) error = notify_activity("image clear");
     xSemaphoreGive(display_mutex);
     return error;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include "crc32.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_partition.h"
@@ -27,18 +28,6 @@ static_assert(sizeof(RecordHeader) == 32);
 const esp_partition_t *slots[2] = {};
 int active_slot = -1;
 uint32_t active_generation = 0;
-
-uint32_t crc32(const uint8_t *bytes, size_t size)
-{
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < size; ++i) {
-        crc ^= bytes[i];
-        for (int bit = 0; bit < 8; ++bit) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-        }
-    }
-    return ~crc;
-}
 
 bool valid_fit(uint32_t value)
 {
@@ -74,6 +63,24 @@ esp_err_t write_payload(const esp_partition_t *partition, const uint8_t *data, s
     }
     return ESP_OK;
 }
+
+constexpr size_t round_up_write_size(size_t size)
+{
+    return (size + 3) & ~size_t(3);
+}
+
+// Number of leading sectors that must be erased before writing this record.
+// write_payload rounds the payload up to four bytes for its final write.
+constexpr size_t record_erase_size(size_t payload_size, size_t sector_size)
+{
+    const size_t written = sizeof(RecordHeader) + round_up_write_size(payload_size);
+    return ((written + sector_size - 1) / sector_size) * sector_size;
+}
+
+static_assert(record_erase_size(1, 4096) == 4096);
+static_assert(record_erase_size(4096 - sizeof(RecordHeader), 4096) == 4096);
+static_assert(record_erase_size(4096 - sizeof(RecordHeader) + 1, 4096) == 8192);
+static_assert(record_erase_size(kMaximumImageBytes, 4096) == kMaximumImageBytes + 4096);
 
 esp_err_t commit_header(const esp_partition_t *partition, RecordHeader &header)
 {
@@ -113,7 +120,13 @@ esp_err_t save(const uint8_t *data, size_t size, display::FitMode fit)
     if (data == nullptr || size == 0 || size > kMaximumImageBytes) return ESP_ERR_INVALID_SIZE;
     const int target = active_slot == 0 ? 1 : 0;
     const esp_partition_t *partition = slots[target];
-    ESP_RETURN_ON_ERROR(esp_partition_erase_range(partition, 0, partition->size), "image-store", "Image slot erase failed");
+    // Erase only the header and payload sectors. The header is erased before
+    // the payload is written and its magic is committed last, so an interrupted
+    // write still leaves this slot invalid and the previous image recoverable.
+    const size_t erase_size = record_erase_size(size, partition->erase_size);
+    ESP_RETURN_ON_FALSE(erase_size <= partition->size, ESP_ERR_INVALID_SIZE,
+                        "image-store", "Image record exceeds the flash slot");
+    ESP_RETURN_ON_ERROR(esp_partition_erase_range(partition, 0, erase_size), "image-store", "Image slot erase failed");
     ESP_RETURN_ON_ERROR(write_payload(partition, data, size), "image-store", "Image payload write failed");
 
     RecordHeader header = {};
@@ -121,7 +134,7 @@ esp_err_t save(const uint8_t *data, size_t size, display::FitMode fit)
     header.version = kVersion;
     header.generation = active_generation + 1;
     header.length = static_cast<uint32_t>(size);
-    header.crc32 = crc32(data, size);
+    header.crc32 = image::crc32(data, size);
     header.fit = static_cast<uint32_t>(fit);
     ESP_RETURN_ON_ERROR(commit_header(partition, header), "image-store", "Image record commit failed");
     active_slot = target;
@@ -141,7 +154,7 @@ esp_err_t load(uint8_t **data, size_t *size, display::FitMode *fit)
     auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(header.length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (buffer == nullptr) return ESP_ERR_NO_MEM;
     const esp_err_t error = esp_partition_read(slots[active_slot], sizeof(header), buffer, header.length);
-    if (error != ESP_OK || crc32(buffer, header.length) != header.crc32) {
+    if (error != ESP_OK || image::crc32(buffer, header.length) != header.crc32) {
         heap_caps_free(buffer);
         return error == ESP_OK ? ESP_ERR_INVALID_CRC : error;
     }
@@ -155,13 +168,18 @@ esp_err_t clear()
 {
     if (slots[0] == nullptr || slots[1] == nullptr) return ESP_ERR_INVALID_STATE;
     const int target = active_slot == 0 ? 1 : 0;
-    ESP_RETURN_ON_ERROR(esp_partition_erase_range(slots[target], 0, slots[target]->size), "image-store", "Image slot erase failed");
+    const esp_partition_t *partition = slots[target];
+    // The tombstone is header-only; erase one sector instead of the whole slot.
+    ESP_RETURN_ON_FALSE(partition->erase_size >= sizeof(RecordHeader), ESP_ERR_INVALID_SIZE,
+                        "image-store", "Image header does not fit in one erase sector");
+    ESP_RETURN_ON_ERROR(esp_partition_erase_range(partition, 0, partition->erase_size),
+                        "image-store", "Image clear marker erase failed");
     RecordHeader tombstone = {};
     tombstone.magic = kMagic;
     tombstone.version = kVersion;
     tombstone.generation = active_generation + 1;
     tombstone.fit = static_cast<uint32_t>(display::FitMode::contain);
-    ESP_RETURN_ON_ERROR(commit_header(slots[target], tombstone), "image-store", "Image clear marker commit failed");
+    ESP_RETURN_ON_ERROR(commit_header(partition, tombstone), "image-store", "Image clear marker commit failed");
     active_slot = target;
     active_generation = tombstone.generation;
     return ESP_OK;

@@ -23,6 +23,13 @@ struct OverlayRect {
     constexpr int height() const { return y1 - y0; }
 };
 
+// Physical half-open interval along a bar's fill axis (x for 90/270, y for 0/180).
+struct OverlaySpan {
+    int start;
+    int end;
+    constexpr bool contains(int value) const { return value >= start && value < end; }
+};
+
 // Viewer coordinates for a physical pixel; matches render_source and touch logical_touch.
 constexpr OverlayPoint viewer_from_physical(OverlayPoint p, unsigned rotation)
 {
@@ -60,6 +67,18 @@ constexpr int bar_filled_rows(unsigned percent)
 {
     return static_cast<int>((static_cast<unsigned long long>(percent > 100 ? 100 : percent) *
                              kBarHeight) / 100);
+}
+
+// Filled physical span for a bar, computed once per update rather than per pixel.
+constexpr OverlaySpan bar_fill_span(const OverlayRect &rect, unsigned rotation, unsigned percent)
+{
+    const int filled = bar_filled_rows(percent);
+    switch (rotation) {
+    case 1: return {rect.x0, rect.x0 + filled};
+    case 2: return {rect.y0, rect.y0 + filled};
+    case 3: return {rect.x1 - filled, rect.x1};
+    default: return {rect.y1 - filled, rect.y1};
+    }
 }
 
 // Whether a physical pixel inside the bar is filled; fill grows up from the viewer's bottom.
