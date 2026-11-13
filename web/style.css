@@ -139,6 +139,7 @@ nav { display: flex; gap: 4px; flex-shrink: 0; }
 .setup-card p { color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .section-heading h2 { margin-bottom: 0; }
+.card-note { color: var(--muted); font-size: 9px; }
 dl { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; margin: 16px 0 0; }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }

@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "app_main.cpp"
          "system/power_management.cpp"
+         "system/telemetry.cpp"
          "input/orientation.cpp"
          "display/display_driver.cpp"
          "display/brightness_settings.cpp"
@@ -18,6 +19,7 @@ idf_component_register(
                   "../web/style.css"
                   "../web/script.js"
     PRIV_REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_spi esp_lcd esp_psram
+                  esp_driver_tsens
                   esp_event esp_netif esp_wifi nvs_flash spi_flash esp_timer esp_http_server espressif__cjson
                   espressif__esp_lcd_co5300 espressif__mdns espressif__esp_jpeg espressif__libpng waveshare__qmi8658
                   espressif__esp_codec_dev waveshare__esp_lcd_touch_cst9217

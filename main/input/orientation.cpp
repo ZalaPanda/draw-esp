@@ -17,10 +17,14 @@ constexpr char kTag[] = "orientation";
 constexpr float kGravity = 9.807f;
 constexpr float kMinimumTiltAcceleration = 0.70f * kGravity;
 constexpr unsigned kStableSamples = 8;
+constexpr unsigned kTemperatureSampleDivider = 10; // about once per second
 
 enum class Candidate : int { none = -1, deg0, deg90, deg180, deg270 };
 qmi8658_dev_t sensor{};
 bool task_started = false;
+portMUX_TYPE temperature_lock = portMUX_INITIALIZER_UNLOCKED;
+float cached_temperature_c = 0.0f;
+bool cached_temperature_valid = false;
 
 Candidate classify(float x, float y)
 {
@@ -51,6 +55,7 @@ void orientation_task(void *)
     Candidate candidate = Candidate::none;
     unsigned consecutive = 0;
     unsigned read_failures = 0;
+    unsigned temperature_divider = 0;
     for (;;) {
         float x = 0, y = 0, z = 0;
         // The component header declares qmi8658_read_accel_mps2(), but the
@@ -65,6 +70,16 @@ void orientation_task(void *)
             continue;
         }
         read_failures = 0;
+        if (++temperature_divider >= kTemperatureSampleDivider) {
+            temperature_divider = 0;
+            float celsius = 0.0f;
+            if (qmi8658_read_temp(&sensor, &celsius) == ESP_OK && std::isfinite(celsius)) {
+                portENTER_CRITICAL(&temperature_lock);
+                cached_temperature_c = celsius;
+                cached_temperature_valid = true;
+                portEXIT_CRITICAL(&temperature_lock);
+            }
+        }
         const Candidate observed = classify(x, y);
         if (observed == Candidate::none || observed == stable) {
             candidate = Candidate::none;
@@ -108,5 +123,14 @@ esp_err_t start_orientation_monitor()
     task_started = true;
     ESP_LOGI(kTag, "QMI8658 orientation monitor ready (100 ms sampling, %u stable samples)", kStableSamples);
     return ESP_OK;
+}
+
+bool orientation_temperature_celsius(float &celsius)
+{
+    portENTER_CRITICAL(&temperature_lock);
+    const bool valid = cached_temperature_valid;
+    celsius = cached_temperature_c;
+    portEXIT_CRITICAL(&temperature_lock);
+    return valid;
 }
 }

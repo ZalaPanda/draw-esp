@@ -10,6 +10,7 @@
 #include "network/network_manager.h"
 #include "system/board_config.h"
 #include "system/power_management.h"
+#include "system/telemetry.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_psram.h"
@@ -102,6 +103,13 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(input::start_orientation_monitor());
     ESP_LOGI(kTag, "Stage 5 ready: QMI8658 stable-orientation image rotation enabled");
+
+    const esp_err_t telemetry_error = telemetry::initialize();
+    if (telemetry_error == ESP_OK) {
+        ESP_LOGI(kTag, "Stage 10 ready: system telemetry available through /api/device");
+    } else {
+        ESP_LOGE(kTag, "System telemetry unavailable: %s", esp_err_to_name(telemetry_error));
+    }
 
     const esp_err_t touch_error = input::start_touch_brightness();
     if (touch_error != ESP_OK) {

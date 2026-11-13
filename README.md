@@ -13,6 +13,7 @@ A tiny Wi-Fi display with a pixel-art studio built right in:
 - **Pick up where you left off:** The most recently displayed image is saved across restarts with crash-safe updates.
 - **Wake to sound, rest when quiet:** Onboard microphones drive a sound-level indicator and wake the screen after two qualifying sound events; the display fades off after inactivity.
 - **Swipe for the brightness you want:** Adjust brightness with a touch gesture, preview it live, and have your preferred awake level saved.
+- **Keep an eye on the device:** See the SoC and IMU temperatures, CPU load, internal RAM/PSRAM and uptime in the setup view.
 
 ## 1. Project goal
 
@@ -260,6 +261,12 @@ Endpoints:
 | POST | `/api/image` | Upload and display an image |
 | DELETE | `/api/image` | Clear the display |
 
+`GET /api/device` returns the board identity and a `system` object with cached
+telemetry: uptime, SoC and IMU die temperatures, aggregate CPU load, and
+internal RAM/PSRAM free, lifetime-minimum and largest-block figures. Readings
+unavailable at sampling time are JSON `null`. Stage 10 documents their meaning
+and limitations; no new endpoint is introduced.
+
 ### Image upload
 
 Use binary HTTP request bodies.
@@ -374,8 +381,9 @@ Editor behavior:
   usable without a reachable device; sending and setup require the device API.
 
 Setup retains device/network status and current IP addresses, manual and periodic
-status refresh, Wi-Fi SSID/password configuration, and **Clear device**. Clearing
-the device does not clear the local drawing.
+status refresh, a read-only **System** card (SoC and IMU temperatures, 30 s CPU
+load, internal RAM and PSRAM, uptime), Wi-Fi SSID/password configuration, and
+**Clear device**. Clearing the device does not clear the local drawing.
 
 The left-aligned view menu and a single row of Import/Fit/PNG/Send actions occupy
 the header. These actions are visible only in Editor; compact screens use labeled
@@ -549,7 +557,7 @@ The Stage 1A 11-step brightness-cycle assertions were removed with that cycle in
 
 ```powershell
 # After loading the ESP-IDF profile:
-xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp tests\activity_state_test.cpp tests\sound_events_test.cpp tests\touch_gesture_test.cpp tests\live_brightness_test.cpp tests\overlay_geometry_test.cpp tests\render_mapping_test.cpp tests\crc32_test.cpp
+xtensa-esp32s3-elf-g++.exe -std=c++17 -fsyntax-only -Wall -Wextra -Werror -I main tests\button_debouncer_test.cpp tests\activity_state_test.cpp tests\sound_events_test.cpp tests\touch_gesture_test.cpp tests\live_brightness_test.cpp tests\overlay_geometry_test.cpp tests\render_mapping_test.cpp tests\crc32_test.cpp tests\telemetry_test.cpp
 if ($LASTEXITCODE -ne 0) { throw "Logic regression tests failed" }
 python "$env:IDF_PATH\tools\idf.py" build
 if ($LASTEXITCODE -ne 0) { throw "Firmware build failed" }
@@ -904,6 +912,60 @@ interrupted upload and clear tests at each stage (during erase, payload write,
 and header commit) and confirm recovery of the previous image or clear marker.
 Upload latency and wear reduction still require measurement on the board, and
 the stale-payload tradeoff above means this is not secure erasure.
+
+### Stage 10 — System telemetry (implemented; board validation pending)
+
+- `main/system/telemetry.cpp` samples system health every 30 s in a low-priority
+  task and publishes one immutable snapshot to the HTTP layer behind a critical
+  section. The task does not touch the display, network or audio paths, and the
+  HTTP handler only copies the cached snapshot.
+- **ESP32-S3 internal temperature:** `esp_driver_tsens` with a 20–100 °C range
+  (±2 °C) and the driver's automatic range adjustment. It measures the SoC die,
+  not the panel or the ambient air; Espressif explicitly does not recommend this
+  sensor for ambient measurement. A sensor failure is logged and only disables
+  that field. The sensor is read only from the telemetry task.
+- **QMI8658 temperature:** the existing 100 ms orientation task reads registers
+  `0x33/0x34` through `qmi8658_read_temp()` about once per second and caches the
+  value behind a spinlock; the telemetry task never accesses the sensor
+  directly. This is the IMU die and the closest board-level proxy for panel
+  heating, not the panel temperature itself. The board has no panel temperature
+  sensor.
+- **CPU load:** `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y` with the ESP timer
+  and 32-bit counters. Every 30 s the task reads both idle tasks' run-time
+  counters via `vTaskGetInfo()` and computes `100 - idle / (2 × elapsed)`. The
+  first value becomes valid after the first full window. The option adds 8 bytes
+  per TCB and a high-resolution timer call per context switch; it is the
+  supported way to obtain CPU load in ESP-IDF 6.1, which has no
+  `esp_cpu_get_usage()` API. Counter deltas are wrap-safe.
+- **Memory:** internal 8-bit free, lifetime-minimum and largest-block figures and
+  PSRAM free/largest block via `heap_caps_get_info()`. The PSRAM largest block is
+  the relevant limit for uploads and decoding.
+- `GET /api/device` keeps its existing fields and adds a `system` object:
+  `uptime_s`, `temperature_c`, `imu_temperature_c`, `cpu_load_percent`,
+  `heap_internal_free`, `heap_internal_min_free`, `heap_internal_largest`,
+  `psram_free`, `psram_largest`. Unavailable readings are JSON `null`; no new
+  endpoint or API break is introduced.
+- The Setup view adds a read-only `02 / SYSTEM` card; the existing 10 s status
+  refresh updates it. Wi-Fi setup and device display are renumbered to 03/04 but
+  unchanged.
+- The sampling task logs one DEBUG line every 60 s (`tag telemetry`), including
+  invalid fields as `n/a`; INFO output is limited to startup. Existing log levels
+  are unchanged.
+- No panel brightness, power, NVS or Wi-Fi behavior changes. No new hardware,
+  partitions or dependencies are required beyond `esp_driver_tsens`, which is
+  part of ESP-IDF.
+
+Stage 10 software validation (2026-11-13): target-compiler C++17 regression
+tests pass, including `tests/telemetry_test.cpp` for aggregate CPU-load bounds,
+empty windows, capacity clamping and wrap-safe counter deltas. `node --check`
+passes for the web script, and a mocked same-origin API check renders the SYSTEM
+card with the expected temperature, CPU-load, memory and uptime text. The
+ESP-IDF 6.1 ESP32-S3 build passes and
+`CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y` plus the ESP-timer/32-bit defaults
+are present in the generated configuration. The firmware image is 0x129df0
+bytes, leaving 53% of the 2.5 MiB application partition free. No firmware was
+flashed; physical sensor readings, CPU-load behavior and the Setup card layout
+remain to be validated on the board.
 
 ## 13. Critical development rules
 

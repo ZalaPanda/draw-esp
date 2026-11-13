@@ -403,6 +403,37 @@ byId('download-button').addEventListener('click', async () => {
     }
 });
 
+const formatTemperature = (value) => Number.isFinite(value) ? `${value.toFixed(1)} \u00b0C` : '--';
+const formatBytes = (bytes) => {
+    if (!Number.isFinite(bytes)) return '--';
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${bytes} B`;
+};
+const formatMemory = (free, minimum, largest) => {
+    if (!Number.isFinite(free)) return '--';
+    const parts = [`${formatBytes(free)} free`];
+    if (Number.isFinite(minimum)) parts.push(`min ${formatBytes(minimum)}`);
+    if (Number.isFinite(largest)) parts.push(`largest ${formatBytes(largest)}`);
+    return parts.join(' / ');
+};
+const formatUptime = (seconds) => {
+    if (!Number.isFinite(seconds)) return '--';
+    const total = Math.max(0, Math.floor(seconds));
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const remaining = total % 60;
+    if (days > 0) return `${days} d ${hours} h`;
+    if (hours > 0) return `${hours} h ${String(minutes).padStart(2, '0')} m`;
+    if (minutes > 0) return `${minutes} m ${String(remaining).padStart(2, '0')} s`;
+    return `${remaining} s`;
+};
+const clearSystem = () => {
+    ['system-temperature', 'system-imu-temperature', 'system-cpu-load',
+        'system-internal-ram', 'system-psram', 'system-uptime']
+        .forEach((id) => { byId(id).textContent = '--'; });
+};
 const requestJson = async (path, options = {}) => {
     const response = await fetch(path, { ...options, signal: AbortSignal.timeout(20000) });
     const text = await response.text();
@@ -429,6 +460,15 @@ const refresh = async (announce = false) => {
         byId('sta-ip').textContent = network.sta.ip || '--';
         byId('ap-status').textContent = network.ap.enabled ? network.ap.ssid : 'Off';
         byId('ap-ip').textContent = network.ap.enabled ? network.ap.ip : '--';
+        const system = device.system || {};
+        byId('system-temperature').textContent = formatTemperature(system.temperature_c);
+        byId('system-imu-temperature').textContent = formatTemperature(system.imu_temperature_c);
+        byId('system-cpu-load').textContent = Number.isFinite(system.cpu_load_percent)
+            ? `${system.cpu_load_percent} %` : '--';
+        byId('system-internal-ram').textContent = formatMemory(system.heap_internal_free,
+            system.heap_internal_min_free, system.heap_internal_largest);
+        byId('system-psram').textContent = formatMemory(system.psram_free, undefined, system.psram_largest);
+        byId('system-uptime').textContent = formatUptime(system.uptime_s);
         byId('connection').textContent = 'ESP ONLINE';
         byId('connection').className = 'connection online';
         if (announce) message('Device status refreshed.', 'success');
@@ -439,6 +479,7 @@ const refresh = async (announce = false) => {
         byId('sta-ip').textContent = '--';
         byId('ap-status').textContent = 'Unavailable';
         byId('ap-ip').textContent = '--';
+        clearSystem();
         if (announce) message(`Status unavailable: ${error.message}. Drawing still works offline.`, 'error');
     } finally {
         refreshPending = false;

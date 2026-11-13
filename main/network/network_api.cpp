@@ -1,5 +1,6 @@
 #include "network_api.h"
 
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include "image/image_decoder.h"
 #include "image/image_store.h"
 #include "system/board_config.h"
+#include "system/telemetry.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
@@ -106,6 +108,11 @@ bool get_string(cJSON *root, const char *name, const char *&value)
     }
     value = item->valuestring;
     return true;
+}
+
+double round_tenth(float value)
+{
+    return std::round(static_cast<double>(value) * 10.0) / 10.0;
 }
 
 esp_err_t handle_root(httpd_req_t *request)
@@ -249,11 +256,43 @@ esp_err_t handle_device(httpd_req_t *request)
     if (root == nullptr) {
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON allocation failed");
     }
+    cJSON *system = cJSON_CreateObject();
+    if (system == nullptr) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON allocation failed");
+    }
     cJSON_AddBoolToObject(root, "success", true);
     cJSON_AddStringToObject(root, "name", "ESP32 Network Image Display");
     cJSON_AddStringToObject(root, "model", "Waveshare ESP32-S3-Touch-AMOLED-2.16");
     cJSON_AddNumberToObject(root, "display_width", board::kDisplayWidth);
     cJSON_AddNumberToObject(root, "display_height", board::kDisplayHeight);
+
+    const telemetry::Snapshot state = telemetry::snapshot();
+    cJSON_AddNumberToObject(system, "uptime_s", static_cast<double>(state.uptime_us / 1000000ULL));
+    if (state.cpu_temperature_valid) {
+        cJSON_AddNumberToObject(system, "temperature_c", round_tenth(state.cpu_temperature_c));
+    } else {
+        cJSON_AddNullToObject(system, "temperature_c");
+    }
+    if (state.imu_temperature_valid) {
+        cJSON_AddNumberToObject(system, "imu_temperature_c", round_tenth(state.imu_temperature_c));
+    } else {
+        cJSON_AddNullToObject(system, "imu_temperature_c");
+    }
+    if (state.cpu_load_valid) {
+        cJSON_AddNumberToObject(system, "cpu_load_percent", state.cpu_load_percent);
+    } else {
+        cJSON_AddNullToObject(system, "cpu_load_percent");
+    }
+    cJSON_AddNumberToObject(system, "heap_internal_free", static_cast<double>(state.internal_free_bytes));
+    cJSON_AddNumberToObject(system, "heap_internal_min_free",
+                            static_cast<double>(state.internal_minimum_free_bytes));
+    cJSON_AddNumberToObject(system, "heap_internal_largest",
+                            static_cast<double>(state.internal_largest_free_block_bytes));
+    cJSON_AddNumberToObject(system, "psram_free", static_cast<double>(state.psram_free_bytes));
+    cJSON_AddNumberToObject(system, "psram_largest",
+                            static_cast<double>(state.psram_largest_free_block_bytes));
+    cJSON_AddItemToObject(root, "system", system);
     return send_json(request, root);
 }
 

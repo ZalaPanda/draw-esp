@@ -88,7 +88,18 @@
                 </dl>
             </section>
             <section class="setup-card">
-                <h2>02 / WI-FI SETUP</h2>
+                <div class="section-heading"><h2>02 / SYSTEM</h2><span class="card-note">30 S SAMPLE</span></div>
+                <dl id="system">
+                    <dt>SoC temp</dt><dd id="system-temperature">--</dd>
+                    <dt>IMU temp</dt><dd id="system-imu-temperature">--</dd>
+                    <dt>CPU load</dt><dd id="system-cpu-load">--</dd>
+                    <dt>Internal RAM</dt><dd id="system-internal-ram">--</dd>
+                    <dt>PSRAM</dt><dd id="system-psram">--</dd>
+                    <dt>Uptime</dt><dd id="system-uptime">--</dd>
+                </dl>
+            </section>
+            <section class="setup-card">
+                <h2>03 / WI-FI SETUP</h2>
                 <p>Connect your display to a 2.4 GHz network. Use a trusted local network.</p>
                 <form id="wifi">
                     <label>NETWORK SSID<input name="ssid" required maxlength="32" autocomplete="off" placeholder="Network name"></label>
@@ -97,7 +108,7 @@
                 </form>
             </section>
             <section class="setup-card device-actions">
-                <div><h2>03 / DEVICE DISPLAY</h2><p>Clear the device, not your local drawing.</p></div>
+                <div><h2>04 / DEVICE DISPLAY</h2><p>Clear the device, not your local drawing.</p></div>
                 <button id="clear-button" type="button">CLEAR DEVICE</button>
             </section>
         </main>
